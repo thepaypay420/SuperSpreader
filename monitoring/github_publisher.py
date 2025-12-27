@@ -133,10 +133,27 @@ def _build_report_md(store: Any, *, log_tail: str | None) -> str:
 
 def _github_headers(token: str) -> dict[str, str]:
     return {
-        "Authorization": f"token {token}",
+        # Use Bearer to support both classic and fine-grained tokens.
+        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "User-Agent": "superspreader-local-publisher",
     }
+
+
+def _raise_for_status_with_context(r: requests.Response, *, action: str) -> None:
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        # Include response body to make auth/permissions errors actionable.
+        try:
+            body = r.text
+        except Exception:
+            body = None
+        raise requests.HTTPError(
+            f"{action} failed: HTTP {r.status_code}. body={body!r}",
+            response=r,
+            request=getattr(e, "request", None),
+        ) from e
 
 
 def _create_gist(token: str, *, filename: str, content: str) -> GistRef:
@@ -150,7 +167,7 @@ def _create_gist(token: str, *, filename: str, content: str) -> GistRef:
         },
         timeout=20,
     )
-    r.raise_for_status()
+    _raise_for_status_with_context(r, action="create_gist")
     data = r.json()
     return GistRef(gist_id=str(data["id"]), html_url=data.get("html_url"))
 
@@ -162,7 +179,7 @@ def _update_gist(token: str, gist_id: str, *, filename: str, content: str) -> No
         json={"files": {filename: {"content": content}}},
         timeout=20,
     )
-    r.raise_for_status()
+    _raise_for_status_with_context(r, action="update_gist")
 
 
 async def run_github_publisher_task(settings: Any, store: Any) -> None:
@@ -177,6 +194,11 @@ async def run_github_publisher_task(settings: Any, store: Any) -> None:
     log = get_logger(__name__)
 
     if not bool(getattr(settings, "github_publish_enabled", False)):
+        log.info(
+            "github_publish.disabled",
+            reason="not_enabled",
+            hint="Set GITHUB_PUBLISH_ENABLED=1 and GH_TOKEN/GITHUB_TOKEN to publish a snapshot gist.",
+        )
         while True:
             await asyncio.sleep(3600)
 
@@ -191,6 +213,14 @@ async def run_github_publisher_task(settings: Any, store: Any) -> None:
     tail_lines = int(getattr(settings, "github_publish_log_tail_lines", 200))
     log_file = getattr(settings, "log_file", None)
     filename = "snapshot.md"
+
+    log.info(
+        "github_publish.enabled",
+        interval_secs=interval,
+        has_gist_id=bool(gist_id),
+        has_log_file=bool(log_file),
+        tail_lines=tail_lines,
+    )
 
     while True:
         try:

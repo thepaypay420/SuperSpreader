@@ -13,10 +13,26 @@ from utils.logging import get_logger
 
 def _github_headers(token: str) -> dict[str, str]:
     return {
-        "Authorization": f"token {token}",
+        # Use Bearer to support both classic and fine-grained tokens.
+        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "User-Agent": "superspreader-local-repo-publisher",
     }
+
+
+def _raise_for_status_with_context(r: requests.Response, *, action: str) -> None:
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        try:
+            body = r.text
+        except Exception:
+            body = None
+        raise requests.HTTPError(
+            f"{action} failed: HTTP {r.status_code}. body={body!r}",
+            response=r,
+            request=getattr(e, "request", None),
+        ) from e
 
 
 def _get_current_file_sha(token: str, repo: str, path: str, branch: str) -> str | None:
@@ -28,9 +44,14 @@ def _get_current_file_sha(token: str, repo: str, path: str, branch: str) -> str 
     )
     if r.status_code == 404:
         return None
-    r.raise_for_status()
+    _raise_for_status_with_context(r, action="get_contents_sha")
     data = r.json()
-    return data.get("sha")
+    # If the path resolves to a directory, GitHub returns a list.
+    if isinstance(data, list):
+        return None
+    if isinstance(data, dict):
+        return data.get("sha")
+    return None
 
 
 def _put_file(token: str, repo: str, path: str, branch: str, *, content: str, sha: str | None, message: str) -> None:
@@ -48,7 +69,7 @@ def _put_file(token: str, repo: str, path: str, branch: str, *, content: str, sh
         json=payload,
         timeout=30,
     )
-    r.raise_for_status()
+    _raise_for_status_with_context(r, action="put_contents_file")
 
 
 async def run_repo_publisher_task(settings: Any, store: Any) -> None:
@@ -64,6 +85,11 @@ async def run_repo_publisher_task(settings: Any, store: Any) -> None:
     log = get_logger(__name__)
 
     if not bool(getattr(settings, "github_repo_publish_enabled", False)):
+        log.info(
+            "github_repo_publish.disabled",
+            reason="not_enabled",
+            hint="Set GITHUB_REPO_PUBLISH_ENABLED=1, GITHUB_REPO=owner/name, and GH_TOKEN/GITHUB_TOKEN to publish into a repo file.",
+        )
         while True:
             await asyncio.sleep(3600)
 
@@ -87,6 +113,16 @@ async def run_repo_publisher_task(settings: Any, store: Any) -> None:
     log_file = getattr(settings, "log_file", None)
 
     last_sha: str | None = None
+
+    log.info(
+        "github_repo_publish.enabled",
+        repo=str(repo),
+        branch=branch,
+        path=path,
+        interval_secs=interval,
+        has_log_file=bool(log_file),
+        tail_lines=tail_lines,
+    )
 
     while True:
         try:
