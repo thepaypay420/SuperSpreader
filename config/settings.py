@@ -99,6 +99,9 @@ class Settings:
         if trade_mode not in {"paper", "live"}:
             raise ValueError("TRADE_MODE must be paper|live")
         run_mode = (_get_env("RUN_MODE", "paper") or "paper").lower()
+        # Portable default: keep SQLite under the project working directory.
+        # Users can override via SQLITE_PATH in their .env.
+        default_sqlite_path = os.path.join(".", "data", "polymarket_trader.sqlite")
 
         return cls(
             trade_mode=trade_mode,
@@ -132,7 +135,7 @@ class Settings:
             stop_before_end_secs=_get_float("STOP_BEFORE_END_SECS", 3600.0),
             max_feed_lag_secs=_get_float("MAX_FEED_LAG_SECS", 5.0),
             max_spread=_get_float("MAX_SPREAD", 0.20),
-            sqlite_path=_get_env("SQLITE_PATH", "/workspace/polymarket_trader.sqlite") or "",
+            sqlite_path=_get_env("SQLITE_PATH", default_sqlite_path) or "",
             log_level=_get_env("LOG_LEVEL", "INFO") or "INFO",
             json_logs=_get_bool("JSON_LOGS", True),
             backtest_speed=_get_float("BACKTEST_SPEED", 50.0),
