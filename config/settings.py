@@ -90,6 +90,13 @@ class Settings:
     github_publish_interval_secs: int
     github_publish_log_tail_lines: int
 
+    # Optional: publish periodic snapshots into a GitHub repo file (Contents API)
+    github_repo_publish_enabled: bool
+    github_repo: str | None  # "owner/name"
+    github_repo_branch: str
+    github_repo_path: str
+    github_repo_commit_prefix: str
+
     # Monitoring (local web dashboard)
     dashboard_enabled: bool
     dashboard_host: str
@@ -162,6 +169,11 @@ class Settings:
             github_gist_id=_get_env("GITHUB_GIST_ID"),
             github_publish_interval_secs=_get_int("GITHUB_PUBLISH_INTERVAL_SECS", 60),
             github_publish_log_tail_lines=_get_int("GITHUB_PUBLISH_LOG_TAIL_LINES", 200),
+            github_repo_publish_enabled=_get_bool("GITHUB_REPO_PUBLISH_ENABLED", False),
+            github_repo=_get_env("GITHUB_REPO"),
+            github_repo_branch=_get_env("GITHUB_REPO_BRANCH", "main") or "main",
+            github_repo_path=_get_env("GITHUB_REPO_PATH", "ops/telemetry/latest.md") or "ops/telemetry/latest.md",
+            github_repo_commit_prefix=_get_env("GITHUB_REPO_COMMIT_PREFIX", "telemetry") or "telemetry",
             dashboard_enabled=_get_bool("DASHBOARD_ENABLED", True),
             dashboard_host=_get_env("DASHBOARD_HOST", "127.0.0.1") or "127.0.0.1",
             dashboard_port=_get_int("DASHBOARD_PORT", 8000),

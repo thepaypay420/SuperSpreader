@@ -103,6 +103,26 @@ Env vars (in `.env`):
 - `DASHBOARD_PORT=8000`
 - `DASHBOARD_OPEN_BROWSER=1`: auto-open your browser on start
 
+### Publishing telemetry for remote review (recommended for collaboration)
+
+If you want to run locally but share how the bot is doing, you can publish a periodic snapshot:
+
+- **Option A (cleanest): GitHub Gist** (no repo commits)
+  - `GITHUB_PUBLISH_ENABLED=1`
+  - `GH_TOKEN=...` (or `GITHUB_TOKEN`)
+  - optional `GITHUB_GIST_ID=...` to update an existing gist
+
+- **Option B: write into a repo file** (creates a commit each update)
+  - `GITHUB_REPO_PUBLISH_ENABLED=1`
+  - `GITHUB_REPO=owner/name` (e.g. `thepaypay420/SuperSpreader`)
+  - `GITHUB_REPO_BRANCH=main`
+  - `GITHUB_REPO_PATH=ops/telemetry/latest.md`
+
+Both options share common controls:
+- `LOG_FILE=./logs/trader.jsonl` (optional; enables log tail publishing)
+- `GITHUB_PUBLISH_INTERVAL_SECS=60`
+- `GITHUB_PUBLISH_LOG_TAIL_LINES=200`
+
 ### Tests
 
 ```bash
