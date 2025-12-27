@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from utils.logging import get_logger
+from monitoring.publisher_status import set_publisher_status
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,12 @@ async def run_github_publisher_task(settings: Any, store: Any) -> None:
     log = get_logger(__name__)
 
     if not bool(getattr(settings, "github_publish_enabled", False)):
+        set_publisher_status(
+            "github_gist",
+            state="disabled",
+            enabled=False,
+            detail={"reason": "not_enabled"},
+        )
         log.info(
             "github_publish.disabled",
             reason="not_enabled",
@@ -212,6 +219,12 @@ async def run_github_publisher_task(settings: Any, store: Any) -> None:
 
     token = getattr(settings, "github_token", None)
     if not token:
+        set_publisher_status(
+            "github_gist",
+            state="disabled",
+            enabled=False,
+            detail={"reason": "missing_token"},
+        )
         log.warning("github_publish.disabled", reason="missing_token")
         while True:
             await asyncio.sleep(3600)
@@ -223,6 +236,19 @@ async def run_github_publisher_task(settings: Any, store: Any) -> None:
     log_file = getattr(settings, "log_file", None)
     filename = "snapshot.md"
 
+    set_publisher_status(
+        "github_gist",
+        state="running",
+        enabled=True,
+        detail={
+            "has_gist_id": bool(gist_id),
+            "gist_id_file": str(gist_id_file) if gist_id_file else None,
+            "interval_secs": interval,
+            "has_log_file": bool(log_file),
+            "tail_lines": tail_lines,
+        },
+    )
+
     log.info(
         "github_publish.enabled",
         interval_secs=interval,
@@ -232,6 +258,8 @@ async def run_github_publisher_task(settings: Any, store: Any) -> None:
     )
 
     while True:
+        attempt_ts = time.time()
+        set_publisher_status("github_gist", last_attempt_ts=attempt_ts)
         try:
             tail = None
             if log_file:
@@ -242,6 +270,19 @@ async def run_github_publisher_task(settings: Any, store: Any) -> None:
                 ref = await asyncio.to_thread(_create_gist, token, filename=filename, content=content)
                 gist_id = ref.gist_id
                 log.info("github_publish.gist_created", gist_id=gist_id, url=ref.html_url)
+                set_publisher_status(
+                    "github_gist",
+                    state="ok",
+                    last_success_ts=time.time(),
+                    last_error=None,
+                    detail={
+                        "gist_id": str(gist_id),
+                        "url": ref.html_url or f"https://gist.github.com/{gist_id}",
+                        "interval_secs": interval,
+                        "has_log_file": bool(log_file),
+                        "tail_lines": tail_lines,
+                    },
+                )
                 if gist_id_file:
                     try:
                         await asyncio.to_thread(_write_text_file, str(gist_id_file), str(gist_id) + "\n")
@@ -251,8 +292,26 @@ async def run_github_publisher_task(settings: Any, store: Any) -> None:
             else:
                 await asyncio.to_thread(_update_gist, token, str(gist_id), filename=filename, content=content)
                 log.info("github_publish.updated", gist_id=str(gist_id))
-        except Exception:
+                set_publisher_status(
+                    "github_gist",
+                    state="ok",
+                    last_success_ts=time.time(),
+                    last_error=None,
+                    detail={
+                        "gist_id": str(gist_id),
+                        "url": f"https://gist.github.com/{gist_id}",
+                        "interval_secs": interval,
+                        "has_log_file": bool(log_file),
+                        "tail_lines": tail_lines,
+                    },
+                )
+        except Exception as e:
             log.exception("github_publish.error")
+            set_publisher_status(
+                "github_gist",
+                state="error",
+                last_error=str(e)[:2000],
+            )
 
         await asyncio.sleep(max(10, interval))
 

@@ -8,6 +8,7 @@ from typing import Any
 import requests
 
 from monitoring.github_publisher import _build_report_md, _read_tail_lines
+from monitoring.publisher_status import set_publisher_status
 from utils.logging import get_logger
 
 
@@ -85,6 +86,12 @@ async def run_repo_publisher_task(settings: Any, store: Any) -> None:
     log = get_logger(__name__)
 
     if not bool(getattr(settings, "github_repo_publish_enabled", False)):
+        set_publisher_status(
+            "github_repo",
+            state="disabled",
+            enabled=False,
+            detail={"reason": "not_enabled"},
+        )
         log.info(
             "github_repo_publish.disabled",
             reason="not_enabled",
@@ -95,12 +102,24 @@ async def run_repo_publisher_task(settings: Any, store: Any) -> None:
 
     token = getattr(settings, "github_token", None)
     if not token:
+        set_publisher_status(
+            "github_repo",
+            state="disabled",
+            enabled=False,
+            detail={"reason": "missing_token"},
+        )
         log.warning("github_repo_publish.disabled", reason="missing_token")
         while True:
             await asyncio.sleep(3600)
 
     repo = getattr(settings, "github_repo", None)
     if not repo:
+        set_publisher_status(
+            "github_repo",
+            state="disabled",
+            enabled=False,
+            detail={"reason": "missing_repo"},
+        )
         log.warning("github_repo_publish.disabled", reason="missing_repo")
         while True:
             await asyncio.sleep(3600)
@@ -114,6 +133,21 @@ async def run_repo_publisher_task(settings: Any, store: Any) -> None:
 
     last_sha: str | None = None
 
+    set_publisher_status(
+        "github_repo",
+        state="running",
+        enabled=True,
+        detail={
+            "repo": str(repo),
+            "branch": branch,
+            "path": path,
+            "url": f"https://github.com/{repo}/blob/{branch}/{path}",
+            "interval_secs": interval,
+            "has_log_file": bool(log_file),
+            "tail_lines": tail_lines,
+        },
+    )
+
     log.info(
         "github_repo_publish.enabled",
         repo=str(repo),
@@ -125,6 +159,8 @@ async def run_repo_publisher_task(settings: Any, store: Any) -> None:
     )
 
     while True:
+        attempt_ts = time.time()
+        set_publisher_status("github_repo", last_attempt_ts=attempt_ts)
         try:
             tail = None
             if log_file:
@@ -141,10 +177,30 @@ async def run_repo_publisher_task(settings: Any, store: Any) -> None:
             # Fetch the new SHA so next update is consistent.
             last_sha = await asyncio.to_thread(_get_current_file_sha, token, repo, path, branch)
             log.info("github_repo_publish.updated", repo=str(repo), branch=branch, path=path)
-        except Exception:
+            set_publisher_status(
+                "github_repo",
+                state="ok",
+                last_success_ts=time.time(),
+                last_error=None,
+                detail={
+                    "repo": str(repo),
+                    "branch": branch,
+                    "path": path,
+                    "url": f"https://github.com/{repo}/blob/{branch}/{path}",
+                    "interval_secs": interval,
+                    "has_log_file": bool(log_file),
+                    "tail_lines": tail_lines,
+                },
+            )
+        except Exception as e:
             # Force re-fetch SHA next loop (handles manual edits / force pushes).
             last_sha = None
             log.exception("github_repo_publish.error", repo=str(repo), branch=branch, path=path)
+            set_publisher_status(
+                "github_repo",
+                state="error",
+                last_error=str(e)[:2000],
+            )
 
         await asyncio.sleep(max(15, interval))
 

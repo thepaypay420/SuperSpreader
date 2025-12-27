@@ -6,6 +6,8 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from monitoring.publisher_status import get_publisher_statuses
+
 
 def build_app(settings: Any, store: Any) -> FastAPI:
     app = FastAPI(title="SuperSpreader Dashboard", version="0.1.0")
@@ -143,6 +145,19 @@ def build_app(settings: Any, store: Any) -> FastAPI:
       }}
       .small {{ font-size: 12px; color: var(--muted); }}
       .footer {{ margin-top: 14px; color: var(--muted); font-size: 12px; }}
+      .banner {{
+        margin-top: 12px;
+        padding: 10px 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(255,255,255,0.14);
+        background: rgba(255, 77, 77, 0.10);
+        display: none;
+      }}
+      .banner pre {{
+        margin: 8px 0 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }}
       .col-12 {{ grid-column: span 12; }}
       .col-8 {{ grid-column: span 8; }}
       .col-6 {{ grid-column: span 6; }}
@@ -173,6 +188,12 @@ def build_app(settings: Any, store: Any) -> FastAPI:
           <div class="chip">Status: <b id="statusText">starting…</b></div>
           <button class="btn" id="refreshBtn">Refresh</button>
         </div>
+      </div>
+
+      <div class="banner" id="errBanner">
+        <div style="font-weight:850;">Something is failing (details)</div>
+        <div class="row2" id="errBannerMsg">--</div>
+        <pre class="mono small" id="errBannerDetail"></pre>
       </div>
 
       <div class="grid">
@@ -212,6 +233,28 @@ def build_app(settings: Any, store: Any) -> FastAPI:
               <div class="small">Next “level up” progress</div>
               <div class="progress"><div class="bar" id="xpBar"></div></div>
             </div>
+          </div>
+        </div>
+
+        <div class="card col-12">
+          <div class="hd">
+            <div class="h">GitHub publishing</div>
+            <div class="pill" id="ghPubMeta">--</div>
+          </div>
+          <div class="bd">
+            <table>
+              <thead>
+                <tr>
+                  <th>publisher</th>
+                  <th>state</th>
+                  <th>target</th>
+                  <th>last success</th>
+                  <th>last error</th>
+                </tr>
+              </thead>
+              <tbody id="ghPubRows"></tbody>
+            </table>
+            <div class="row2">Tip: “github_gist” publishes a private Gist; use the target URL shown here to view it. “github_repo” publishes to a repo file (commits each update).</div>
           </div>
         </div>
 
@@ -385,7 +428,11 @@ def build_app(settings: Any, store: Any) -> FastAPI:
 
       async function getJson(path) {{
         const r = await fetch(path, {{ cache: "no-store" }});
-        if (!r.ok) throw new Error(`${{path}} -> ${{r.status}}`);
+        if (!r.ok) {{
+          let body = "";
+          try {{ body = await r.text(); }} catch (e) {{}}
+          throw new Error(`${{path}} -> ${{r.status}}${{body ? ("\\n" + body) : ""}}`);
+        }}
         return await r.json();
       }}
 
@@ -393,6 +440,52 @@ def build_app(settings: Any, store: Any) -> FastAPI:
         const el = document.getElementById("statusText");
         el.textContent = msg;
         el.className = ok ? "good" : "bad";
+      }}
+
+      function showBanner(msg, detail) {{
+        const b = document.getElementById("errBanner");
+        document.getElementById("errBannerMsg").textContent = msg || "--";
+        document.getElementById("errBannerDetail").textContent = detail || "";
+        b.style.display = "block";
+      }}
+      function hideBanner() {{
+        const b = document.getElementById("errBanner");
+        b.style.display = "none";
+      }}
+
+      function renderPublishers(pubs) {{
+        const tb = document.getElementById("ghPubRows");
+        tb.innerHTML = "";
+        const keys = Object.keys(pubs || {{}}).sort();
+        if (!keys.length) {{
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td colspan="5" class="small">no publisher status available yet</td>`;
+          tb.appendChild(tr);
+          document.getElementById("ghPubMeta").textContent = "--";
+          return;
+        }}
+
+        let anyErr = false;
+        for (const k of keys) {{
+          const p = pubs[k] || {{}};
+          const st = (p.state || "--").toString();
+          const cls = st === "ok" ? "good" : (st === "error" ? "bad" : (st === "disabled" ? "warn" : ""));
+          if (st === "error") anyErr = true;
+          const url = p?.detail?.url || null;
+          const target = url ? `<a href="${{escapeHtml(url)}}">${{escapeHtml(url)}}</a>` : escapeHtml(JSON.stringify(p.detail || {{}}));
+          const ls = p.last_success_ts ? new Date(Number(p.last_success_ts)*1000).toLocaleString() : "--";
+          const err = p.last_error ? escapeHtml(p.last_error.toString()) : "";
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td class="mono">${{escapeHtml(k)}}</td>
+            <td class="${{cls}}"><b>${{escapeHtml(st)}}</b></td>
+            <td>${{target}}</td>
+            <td>${{escapeHtml(ls)}}</td>
+            <td class="mono small">${{err}}</td>
+          `;
+          tb.appendChild(tr);
+        }}
+        document.getElementById("ghPubMeta").textContent = anyErr ? "errors" : "ok";
       }}
 
       function renderWatch(rows) {{
@@ -494,16 +587,18 @@ def build_app(settings: Any, store: Any) -> FastAPI:
 
       async function refresh() {{
         try {{
-          const [summary, watch, pos, flat, orders, fills] = await Promise.all([
+          const [summary, watch, pos, flat, orders, fills, pubs] = await Promise.all([
             getJson("/api/summary"),
             getJson("/api/watchlist?limit=30"),
             getJson("/api/positions?limit=20"),
             getJson("/api/positions?limit=20&only_flat=1"),
             getJson("/api/orders?limit=25"),
             getJson("/api/fills?limit=25"),
+            getJson("/api/publishers"),
           ]);
 
           setStatus(true, "live");
+          hideBanner();
 
           const pnl = summary.pnl || {{}};
           const total = Number(pnl.total_pnl ?? 0);
@@ -536,8 +631,10 @@ def build_app(settings: Any, store: Any) -> FastAPI:
           renderFlat(flat);
           renderOrders(orders);
           renderFills(fills);
+          renderPublishers(pubs);
         }} catch (e) {{
           setStatus(false, "disconnected");
+          showBanner("Dashboard refresh failed", (e && e.message) ? e.message : String(e));
         }}
       }}
 
@@ -598,6 +695,10 @@ def build_app(settings: Any, store: Any) -> FastAPI:
     @app.get("/api/fills", response_class=JSONResponse)
     def fills(limit: int = 100) -> list[dict[str, Any]]:
         return store.fetch_recent_fills(limit=int(limit))
+
+    @app.get("/api/publishers", response_class=JSONResponse)
+    def publishers() -> dict[str, Any]:
+        return get_publisher_statuses()
 
     return app
 
