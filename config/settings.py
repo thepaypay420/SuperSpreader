@@ -80,6 +80,12 @@ class Settings:
     log_level: str
     json_logs: bool
 
+    # Monitoring (local web dashboard)
+    dashboard_enabled: bool
+    dashboard_host: str
+    dashboard_port: int
+    dashboard_open_browser: bool
+
     # Backtest
     backtest_speed: float
     backtest_start_ts: str | None
@@ -138,6 +144,10 @@ class Settings:
             sqlite_path=_get_env("SQLITE_PATH", default_sqlite_path) or "",
             log_level=_get_env("LOG_LEVEL", "INFO") or "INFO",
             json_logs=_get_bool("JSON_LOGS", True),
+            dashboard_enabled=_get_bool("DASHBOARD_ENABLED", True),
+            dashboard_host=_get_env("DASHBOARD_HOST", "127.0.0.1") or "127.0.0.1",
+            dashboard_port=_get_int("DASHBOARD_PORT", 8000),
+            dashboard_open_browser=_get_bool("DASHBOARD_OPEN_BROWSER", True),
             backtest_speed=_get_float("BACKTEST_SPEED", 50.0),
             backtest_start_ts=_get_env("BACKTEST_START_TS"),
             backtest_end_ts=_get_env("BACKTEST_END_TS"),
