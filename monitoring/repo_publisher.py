@@ -12,16 +12,22 @@ from monitoring.publisher_status import set_publisher_status
 from utils.logging import get_logger
 
 
-def _github_headers(token: str) -> dict[str, str]:
-    # GitHub supports multiple auth schemes. In practice:
-    # - Classic PATs (ghp_...) are most reliably accepted as `Authorization: token <pat>`.
-    # - Fine-grained PATs (github_pat_...) and OAuth tokens generally work with Bearer.
-    scheme = "token" if token.startswith("ghp_") else "Bearer"
+def _github_headers(token: str, *, scheme: str) -> dict[str, str]:
     return {
         "Authorization": f"{scheme} {token}",
         "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "superspreader-local-repo-publisher",
     }
+
+def _auth_schemes_to_try(token: str) -> list[str]:
+    """
+    GitHub supports multiple auth schemes. We try both (once) to reduce
+    hard-to-debug 401s caused by scheme mismatch.
+    """
+    if token.startswith("ghp_"):
+        return ["token", "Bearer"]
+    return ["Bearer", "token"]
 
 
 def _raise_for_status_with_context(r: requests.Response, *, action: str) -> None:
@@ -52,15 +58,25 @@ def _raise_for_status_with_context(r: requests.Response, *, action: str) -> None
 
 
 def _get_current_file_sha(token: str, repo: str, path: str, branch: str) -> str | None:
-    r = requests.get(
-        f"https://api.github.com/repos/{repo}/contents/{path}",
-        headers=_github_headers(token),
-        params={"ref": branch},
-        timeout=20,
-    )
-    if r.status_code == 404:
-        return None
-    _raise_for_status_with_context(r, action="get_contents_sha")
+    r: requests.Response | None = None
+    for scheme in _auth_schemes_to_try(token):
+        r = requests.get(
+            f"https://api.github.com/repos/{repo}/contents/{path}",
+            headers=_github_headers(token, scheme=scheme),
+            params={"ref": branch},
+            timeout=20,
+        )
+        if r.status_code == 401:
+            # Retry once with alternate auth scheme.
+            continue
+        if r.status_code == 404:
+            return None
+        _raise_for_status_with_context(r, action="get_contents_sha")
+        break
+    else:
+        # All schemes yielded 401.
+        _raise_for_status_with_context(r, action="get_contents_sha")  # type: ignore[arg-type]
+
     data = r.json()
     # If the path resolves to a directory, GitHub returns a list.
     if isinstance(data, list):
@@ -79,13 +95,19 @@ def _put_file(token: str, repo: str, path: str, branch: str, *, content: str, sh
     }
     if sha:
         payload["sha"] = sha
-    r = requests.put(
-        f"https://api.github.com/repos/{repo}/contents/{path}",
-        headers=_github_headers(token),
-        json=payload,
-        timeout=30,
-    )
-    _raise_for_status_with_context(r, action="put_contents_file")
+    r: requests.Response | None = None
+    for scheme in _auth_schemes_to_try(token):
+        r = requests.put(
+            f"https://api.github.com/repos/{repo}/contents/{path}",
+            headers=_github_headers(token, scheme=scheme),
+            json=payload,
+            timeout=30,
+        )
+        if r.status_code == 401:
+            continue
+        _raise_for_status_with_context(r, action="put_contents_file")
+        return
+    _raise_for_status_with_context(r, action="put_contents_file")  # type: ignore[arg-type]
 
 
 async def run_repo_publisher_task(settings: Any, store: Any) -> None:

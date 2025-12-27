@@ -132,16 +132,19 @@ def _build_report_md(store: Any, *, log_tail: str | None) -> str:
     return "\n".join(out).strip() + "\n"
 
 
-def _github_headers(token: str) -> dict[str, str]:
-    # GitHub supports multiple auth schemes. In practice:
-    # - Classic PATs (ghp_...) are most reliably accepted as `Authorization: token <pat>`.
-    # - Fine-grained PATs (github_pat_...) and OAuth tokens generally work with Bearer.
-    scheme = "token" if token.startswith("ghp_") else "Bearer"
+def _github_headers(token: str, *, scheme: str) -> dict[str, str]:
     return {
         "Authorization": f"{scheme} {token}",
         "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "superspreader-local-publisher",
     }
+
+def _auth_schemes_to_try(token: str) -> list[str]:
+    # See monitoring/repo_publisher.py for rationale.
+    if token.startswith("ghp_"):
+        return ["token", "Bearer"]
+    return ["Bearer", "token"]
 
 
 def _raise_for_status_with_context(r: requests.Response, *, action: str) -> None:
@@ -173,29 +176,42 @@ def _raise_for_status_with_context(r: requests.Response, *, action: str) -> None
 
 
 def _create_gist(token: str, *, filename: str, content: str) -> GistRef:
-    r = requests.post(
-        "https://api.github.com/gists",
-        headers=_github_headers(token),
-        json={
-            "description": "SuperSpreader trading snapshots (auto-updated)",
-            "public": False,
-            "files": {filename: {"content": content}},
-        },
-        timeout=20,
-    )
-    _raise_for_status_with_context(r, action="create_gist")
+    r: requests.Response | None = None
+    for scheme in _auth_schemes_to_try(token):
+        r = requests.post(
+            "https://api.github.com/gists",
+            headers=_github_headers(token, scheme=scheme),
+            json={
+                "description": "SuperSpreader trading snapshots (auto-updated)",
+                "public": False,
+                "files": {filename: {"content": content}},
+            },
+            timeout=20,
+        )
+        if r.status_code == 401:
+            continue
+        _raise_for_status_with_context(r, action="create_gist")
+        break
+    else:
+        _raise_for_status_with_context(r, action="create_gist")  # type: ignore[arg-type]
     data = r.json()
     return GistRef(gist_id=str(data["id"]), html_url=data.get("html_url"))
 
 
 def _update_gist(token: str, gist_id: str, *, filename: str, content: str) -> None:
-    r = requests.patch(
-        f"https://api.github.com/gists/{gist_id}",
-        headers=_github_headers(token),
-        json={"files": {filename: {"content": content}}},
-        timeout=20,
-    )
-    _raise_for_status_with_context(r, action="update_gist")
+    r: requests.Response | None = None
+    for scheme in _auth_schemes_to_try(token):
+        r = requests.patch(
+            f"https://api.github.com/gists/{gist_id}",
+            headers=_github_headers(token, scheme=scheme),
+            json={"files": {filename: {"content": content}}},
+            timeout=20,
+        )
+        if r.status_code == 401:
+            continue
+        _raise_for_status_with_context(r, action="update_gist")
+        return
+    _raise_for_status_with_context(r, action="update_gist")  # type: ignore[arg-type]
 
 
 def _write_text_file(path: str, content: str) -> None:
