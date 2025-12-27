@@ -46,6 +46,9 @@ RUN_MODE=paper TRADE_MODE=paper python main.py
 
 By default, the system runs with a **mock market-data feed** so it is runnable without live connectivity. It records a tape (`tape` table) into `SQLITE_PATH`.
 
+On Windows/macOS/Linux, a good default is:
+- `SQLITE_PATH=./data/polymarket_trader.sqlite`
+
 To attempt live WebSocket streaming (best-effort, schema may require adjustment):
 
 ```bash

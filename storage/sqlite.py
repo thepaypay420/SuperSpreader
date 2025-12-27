@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from typing import Any, Iterable
 
 
@@ -15,9 +17,37 @@ class SqliteStore:
     """
 
     def __init__(self, path: str):
-        self.path = path
+        if not path or not str(path).strip():
+            raise ValueError("SQLITE_PATH is empty; set SQLITE_PATH in your .env")
+
+        raw = str(path).strip()
+        # Special cases:
+        # - :memory: is valid and should not touch the filesystem.
+        # - file: URIs may be used by advanced users; we won't try to mkdir those.
+        self._is_memory = raw == ":memory:"
+        self._is_uri = raw.startswith("file:")
+
+        if self._is_memory or self._is_uri:
+            self.path = raw
+        else:
+            p = Path(raw).expanduser()
+            # Make relative paths resolve against current working directory.
+            if not p.is_absolute():
+                p = Path(os.getcwd()) / p
+            p.parent.mkdir(parents=True, exist_ok=True)
+            self.path = str(p)
+
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        try:
+            self._conn = sqlite3.connect(self.path, check_same_thread=False, uri=self._is_uri)
+        except sqlite3.OperationalError as e:
+            # Provide a more actionable error message (especially on Windows).
+            raise sqlite3.OperationalError(
+                "unable to open SQLite database file. "
+                f"SQLITE_PATH={self.path!r} cwd={os.getcwd()!r}. "
+                "Fix by setting SQLITE_PATH to a writable location (e.g. ./data/polymarket_trader.sqlite) "
+                "or ensure the parent directory exists."
+            ) from e
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute("PRAGMA synchronous=NORMAL;")
 
