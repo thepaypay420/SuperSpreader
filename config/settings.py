@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import subprocess
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,6 +29,62 @@ def _get_bool(key: str, default: bool) -> bool:
     if v is None or v == "":
         return default
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _detect_github_repo_from_git_config() -> str | None:
+    """
+    Best-effort: infer "owner/name" from .git/config origin URL.
+    Supports HTTPS and SSH remotes.
+    """
+    try:
+        p = os.path.join(".", ".git", "config")
+        if not os.path.exists(p):
+            return None
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            txt = f.read()
+    except Exception:
+        return None
+
+    # Find origin URL block.
+    # Example:
+    # [remote "origin"]
+    #   url = git@github.com:owner/name.git
+    # or url = https://github.com/owner/name.git
+    m = re.search(r'^\[remote\s+"origin"\][\s\S]*?^\s*url\s*=\s*(.+)\s*$', txt, flags=re.MULTILINE)
+    if not m:
+        return None
+    url = m.group(1).strip()
+
+    # https://github.com/owner/name(.git)
+    m2 = re.search(r"github\.com[:/](?P<owner>[^/\s:]+)/(?P<name>[^/\s]+?)(?:\.git)?$", url)
+    if not m2:
+        return None
+    owner = m2.group("owner")
+    name = m2.group("name")
+    if not owner or not name:
+        return None
+    return f"{owner}/{name}"
+
+
+def _detect_github_token_from_gh_cli() -> str | None:
+    """
+    Best-effort: use GitHub CLI auth token if available.
+    Avoids requiring users to manually export GH_TOKEN when they already ran `gh auth login`.
+    """
+    try:
+        cp = subprocess.run(
+            ["gh", "auth", "token"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except Exception:
+        return None
+    if cp.returncode != 0:
+        return None
+    tok = (cp.stdout or "").strip()
+    return tok or None
 
 
 @dataclass(frozen=True)
@@ -126,6 +184,19 @@ class Settings:
         # Users can override via SQLITE_PATH in their .env.
         default_sqlite_path = os.path.join(".", "data", "polymarket_trader.sqlite")
 
+        github_publish_enabled = _get_bool("GITHUB_PUBLISH_ENABLED", False)
+        github_repo_publish_enabled = _get_bool("GITHUB_REPO_PUBLISH_ENABLED", False)
+
+        github_token = _get_env("GITHUB_TOKEN") or _get_env("GH_TOKEN")
+        if not github_token and (github_publish_enabled or github_repo_publish_enabled):
+            github_token = _detect_github_token_from_gh_cli()
+
+        github_repo = _get_env("GITHUB_REPO") or _get_env("GITHUB_REPOSITORY")
+        if github_repo:
+            github_repo = github_repo.strip()
+        if (not github_repo) and github_repo_publish_enabled:
+            github_repo = _detect_github_repo_from_git_config()
+
         return cls(
             trade_mode=trade_mode,
             run_mode=run_mode,
@@ -164,13 +235,13 @@ class Settings:
             log_file=_get_env("LOG_FILE"),
             log_max_bytes=_get_int("LOG_MAX_BYTES", 10_000_000),
             log_backup_count=_get_int("LOG_BACKUP_COUNT", 5),
-            github_publish_enabled=_get_bool("GITHUB_PUBLISH_ENABLED", False),
-            github_token=_get_env("GITHUB_TOKEN") or _get_env("GH_TOKEN"),
+            github_publish_enabled=github_publish_enabled,
+            github_token=github_token,
             github_gist_id=_get_env("GITHUB_GIST_ID"),
             github_publish_interval_secs=_get_int("GITHUB_PUBLISH_INTERVAL_SECS", 60),
             github_publish_log_tail_lines=_get_int("GITHUB_PUBLISH_LOG_TAIL_LINES", 200),
-            github_repo_publish_enabled=_get_bool("GITHUB_REPO_PUBLISH_ENABLED", False),
-            github_repo=_get_env("GITHUB_REPO"),
+            github_repo_publish_enabled=github_repo_publish_enabled,
+            github_repo=github_repo,
             github_repo_branch=_get_env("GITHUB_REPO_BRANCH", "main") or "main",
             github_repo_path=_get_env("GITHUB_REPO_PATH", "ops/telemetry/latest.md") or "ops/telemetry/latest.md",
             github_repo_commit_prefix=_get_env("GITHUB_REPO_COMMIT_PREFIX", "telemetry") or "telemetry",

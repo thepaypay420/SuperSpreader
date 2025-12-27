@@ -19,6 +19,16 @@ async def _run() -> None:
     store.init_db()
 
     log.info("app.start", run_mode=settings.run_mode, trade_mode=settings.trade_mode)
+    log.info(
+        "github_publish.config",
+        gist_enabled=bool(getattr(settings, "github_publish_enabled", False)),
+        repo_enabled=bool(getattr(settings, "github_repo_publish_enabled", False)),
+        has_token=bool(getattr(settings, "github_token", None)),
+        repo=getattr(settings, "github_repo", None),
+        repo_branch=getattr(settings, "github_repo_branch", None),
+        repo_path=getattr(settings, "github_repo_path", None),
+        interval_secs=getattr(settings, "github_publish_interval_secs", None),
+    )
 
     dashboard_task = asyncio.create_task(run_dashboard_task(settings, store))
     publish_task = asyncio.create_task(run_github_publisher_task(settings, store))
