@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 
 Side = Literal["buy", "sell"]
@@ -58,4 +58,5 @@ class Fill:
     price: float
     size: float
     ts: float
+    meta: dict[str, Any] = field(default_factory=dict)
 

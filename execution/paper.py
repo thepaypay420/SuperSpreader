@@ -23,6 +23,7 @@ class PaperBroker(Broker):
         self._store = store
         self._orders: dict[str, Order] = {}
         self._by_market: dict[str, set[str]] = {}
+        self._meta_by_order_id: dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self._log = get_logger(__name__)
 
@@ -41,8 +42,17 @@ class PaperBroker(Broker):
         async with self._lock:
             self._orders[oid] = order
             self._by_market.setdefault(req.market_id, set()).add(oid)
+            self._meta_by_order_id[oid] = dict(req.meta or {})
         self._store.insert_order({**asdict(order), "meta": req.meta or {}})
-        self._log.info("order.placed.paper", order_id=oid, market_id=req.market_id, side=req.side, price=req.price, size=req.size)
+        self._log.info(
+            "order.placed.paper",
+            order_id=oid,
+            market_id=req.market_id,
+            side=req.side,
+            price=req.price,
+            size=req.size,
+            meta=req.meta or {},
+        )
         return order
 
     async def cancel(self, order_id: str) -> None:
@@ -76,6 +86,15 @@ class PaperBroker(Broker):
                 if fill_price is None:
                     continue
 
+                meta = dict(self._meta_by_order_id.get(o.order_id, {}))
+                meta.update(
+                    {
+                        "fill_model": "on_book_cross",
+                        "tob_best_bid": tob.best_bid,
+                        "tob_best_ask": tob.best_ask,
+                        "tob_ts": tob.ts,
+                    }
+                )
                 f = Fill(
                     fill_id=str(uuid.uuid4()),
                     order_id=o.order_id,
@@ -84,6 +103,7 @@ class PaperBroker(Broker):
                     price=float(fill_price),
                     size=float(o.size - o.filled_size),
                     ts=time.time(),
+                    meta=meta,
                 )
                 o.filled_size = o.size
                 o.status = "filled"
@@ -100,6 +120,7 @@ class PaperBroker(Broker):
                 side=f.side,
                 price=f.price,
                 size=f.size,
+                meta=f.meta,
             )
         return fills
 
