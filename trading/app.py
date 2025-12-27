@@ -21,6 +21,8 @@ from trading.state import SharedState
 from trading.types import Fill, MarketInfo, TopOfBook, TradeTick
 from utils.logging import get_logger
 
+_log = get_logger(__name__)
+
 
 async def run_scanner(settings: Any, store: SqliteStore) -> None:
     state = SharedState()
@@ -229,7 +231,45 @@ async def _apply_fills(ctx: StrategyContext, fills: list[Fill]) -> None:
         for f in fills:
             m = ctx.state.markets.get(f.market_id)
             event_id = m.event_id if m else f"event:{f.market_id}"
+            p0 = ctx.portfolio.positions.get(f.market_id)
+            qty0 = 0.0 if p0 is None else float(p0.qty)
+            avg0 = 0.0 if p0 is None else float(p0.avg_price)
+            r0 = 0.0 if p0 is None else float(p0.realized_pnl)
+
             ctx.portfolio.apply_fill(f, event_id=event_id)
+
+            p1 = ctx.portfolio.positions.get(f.market_id)
+            qty1 = 0.0 if p1 is None else float(p1.qty)
+            avg1 = 0.0 if p1 is None else float(p1.avg_price)
+            r1 = 0.0 if p1 is None else float(p1.realized_pnl)
+
+            _log.info(
+                "portfolio.fill_applied",
+                fill_id=f.fill_id,
+                order_id=f.order_id,
+                market_id=f.market_id,
+                event_id=event_id,
+                side=f.side,
+                price=f.price,
+                size=f.size,
+                meta=f.meta,
+                pos_before=qty0,
+                avg_before=avg0,
+                realized_before=r0,
+                pos_after=qty1,
+                avg_after=avg1,
+                realized_after=r1,
+                realized_delta=(r1 - r0),
+            )
+
+            if qty0 != 0.0 and qty1 == 0.0:
+                _log.info(
+                    "portfolio.position_flat",
+                    market_id=f.market_id,
+                    event_id=event_id,
+                    realized_pnl=r1,
+                    meta=f.meta,
+                )
 
 
 async def _persist_snapshots(ctx: StrategyContext) -> None:

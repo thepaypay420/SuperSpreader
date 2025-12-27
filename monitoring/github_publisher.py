@@ -58,6 +58,7 @@ def _build_report_md(store: Any, *, log_tail: str | None) -> str:
 
     open_pos = [p for p in positions if float(p.get("position") or 0.0) != 0.0]
     flat_pos = [p for p in positions if float(p.get("position") or 0.0) == 0.0 and float(p.get("realized_pnl") or 0.0) != 0.0]
+    realized_pos = [p for p in positions if float(p.get("realized_pnl") or 0.0) != 0.0]
 
     def _fmt_usd(x: Any) -> str:
         try:
@@ -97,6 +98,17 @@ def _build_report_md(store: Any, *, log_tail: str | None) -> str:
     for p in sorted(flat_pos, key=lambda r: abs(float(r.get("realized_pnl") or 0.0)), reverse=True)[:20]:
         out.append(
             f"| `{p.get('market_id')}` | {_fmt_usd(p.get('realized_pnl') or 0.0)} | {float(p.get('mark_price') or 0.0):.3f} |"
+        )
+    out.append("")
+
+    out.append(f"## Realized PnL contributors (including still-open) ({len(realized_pos)})")
+    out.append("")
+    out.append("| market_id | pos | rPnL | uPnL | avg | mark |")
+    out.append("|---|---:|---:|---:|---:|---:|")
+    for p in sorted(realized_pos, key=lambda r: abs(float(r.get("realized_pnl") or 0.0)), reverse=True)[:20]:
+        out.append(
+            f"| `{p.get('market_id')}` | {float(p.get('position') or 0.0):.2f} | {_fmt_usd(p.get('realized_pnl') or 0.0)} | "
+            f"{_fmt_usd(p.get('unrealized_pnl') or 0.0)} | {float(p.get('avg_price') or 0.0):.3f} | {float(p.get('mark_price') or 0.0):.3f} |"
         )
     out.append("")
 
