@@ -59,9 +59,9 @@ class MarketMakingStrategy(Strategy):
         inv = 0.0 if pos is None else float(pos.qty)
         max_pos = max(1.0, float(ctx.settings.max_pos_per_market))
         inv_frac = clamp(inv / max_pos, -1.0, 1.0)
-        skew = -inv_frac * float(ctx.settings.mm_inventory_skew) * float(ctx.settings.mm_quote_width)
-
         width = float(ctx.settings.mm_quote_width)
+        skew = -inv_frac * float(ctx.settings.mm_inventory_skew) * width
+
         target_bid = clamp(fair + skew - width / 2.0, 0.01, 0.99)
         target_ask = clamp(fair + skew + width / 2.0, 0.01, 0.99)
         if target_bid >= target_ask:
@@ -77,6 +77,30 @@ class MarketMakingStrategy(Strategy):
 
         q = self._quotes.setdefault(market_id, {})
         qm = self._quote_meta.setdefault(market_id, {})
+
+        # Persist "what we are trying to do" so the dashboard can explain it.
+        # This avoids interpreting raw cancel/replace logs as "random churn".
+        try:
+            ctx.store.insert_quote_snapshot(
+                {
+                    "ts": now,
+                    "market_id": market_id,
+                    "event_id": m.event_id,
+                    "tob_best_bid": float(tob.best_bid),
+                    "tob_best_ask": float(tob.best_ask),
+                    "mid": float(mid),
+                    "fair": float(fair),
+                    "fair_source": str(fair_source),
+                    "inv_qty": float(inv),
+                    "width": float(width),
+                    "skew": float(skew),
+                    "target_bid": float(target_bid),
+                    "target_ask": float(target_ask),
+                }
+            )
+        except Exception:
+            # Never break trading if telemetry write fails.
+            pass
 
         # Replace quotes if older than min life or far from target
         await self._ensure_quote(

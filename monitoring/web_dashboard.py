@@ -215,7 +215,7 @@ def build_app(settings: Any, store: Any) -> FastAPI:
               <div class="kpi">
                 <div class="lbl">Total PnL</div>
                 <div class="val" id="pnlTotal">--</div>
-                <div class="sub">uPnL <span id="pnlU">--</span> • rPnL <span id="pnlR">--</span></div>
+                <div class="sub">uPnL <span id="pnlU">--</span> • rPnL <span id="pnlR">--</span> • <span id="pnlMeta">--</span></div>
               </div>
               <div class="kpi">
                 <div class="lbl">Open Positions</div>
@@ -323,10 +323,35 @@ def build_app(settings: Any, store: Any) -> FastAPI:
           </div>
         </div>
 
+        <div class="card col-12">
+          <div class="hd">
+            <div class="h">Active Quotes (what the bot is trying to do)</div>
+            <div class="pill">mid • fair • spread • targets • inventory</div>
+          </div>
+          <div class="bd">
+            <table>
+              <thead>
+                <tr>
+                  <th class="mono">market_id</th>
+                  <th>Market</th>
+                  <th>mid</th>
+                  <th>spr</th>
+                  <th>fair</th>
+                  <th>our bid</th>
+                  <th>our ask</th>
+                  <th>inv</th>
+                </tr>
+              </thead>
+              <tbody id="quoteRows"></tbody>
+            </table>
+            <div class="row2">Canceled orders in “Order activity” are usually just old quotes being replaced as fair/mid changes.</div>
+          </div>
+        </div>
+
         <div class="card col-6">
           <div class="hd">
-            <div class="h">Recent Orders</div>
-            <div class="pill">paper/live</div>
+            <div class="h">Working Orders (open)</div>
+            <div class="pill">currently live quotes/orders</div>
           </div>
           <div class="bd">
             <table>
@@ -337,6 +362,29 @@ def build_app(settings: Any, store: Any) -> FastAPI:
                   <th>side</th>
                   <th>px</th>
                   <th>size</th>
+                  <th>strategy</th>
+                </tr>
+              </thead>
+              <tbody id="openOrderRows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card col-6">
+          <div class="hd">
+            <div class="h">Order Activity (includes cancels)</div>
+            <div class="pill">cancel/replace churn is normal for market making</div>
+          </div>
+          <div class="bd">
+            <table>
+              <thead>
+                <tr>
+                  <th>time</th>
+                  <th class="mono">market_id</th>
+                  <th>side</th>
+                  <th>px</th>
+                  <th>size</th>
+                  <th>strategy</th>
                   <th>status</th>
                 </tr>
               </thead>
@@ -379,7 +427,8 @@ def build_app(settings: Any, store: Any) -> FastAPI:
         if (!Number.isFinite(n)) return "--";
         const sign = n < 0 ? "-" : "";
         const abs = Math.abs(n);
-        return sign + "$" + abs.toFixed(2);
+        const d = abs < 1 ? 4 : 2;
+        return sign + "$" + abs.toFixed(d);
       }}
       const fmtNum = (x, d=2) => {{
         if (x === null || x === undefined) return "--";
@@ -539,6 +588,7 @@ def build_app(settings: Any, store: Any) -> FastAPI:
         for (const r of rows) {{
           const side = (r.side || "").toLowerCase();
           const sideCls = side === "buy" ? "good" : (side === "sell" ? "warn" : "");
+          const strat = (r?.meta?.strategy || "--").toString();
           const tr = document.createElement("tr");
           tr.innerHTML = `
             <td>${{fmtTs(r.created_ts)}}</td>
@@ -546,7 +596,56 @@ def build_app(settings: Any, store: Any) -> FastAPI:
             <td class="${{sideCls}}"><b>${{escapeHtml((r.side||"--").toString())}}</b></td>
             <td>${{fmtNum(r.price, 3)}}</td>
             <td>${{fmtNum(r.size, 2)}}</td>
+            <td class="mono small">${{escapeHtml(strat)}}</td>
             <td><span class="tag">${{escapeHtml((r.status||"--").toString())}}</span></td>
+          `;
+          tb.appendChild(tr);
+        }}
+      }}
+
+      function renderOpenOrders(rows) {{
+        const tb = document.getElementById("openOrderRows");
+        tb.innerHTML = "";
+        for (const r of rows) {{
+          const side = (r.side || "").toLowerCase();
+          const sideCls = side === "buy" ? "good" : (side === "sell" ? "warn" : "");
+          const strat = (r?.meta?.strategy || "--").toString();
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${{fmtTs(r.created_ts)}}</td>
+            <td class="mono">${{escapeHtml((r.market_id||"--").toString())}}</td>
+            <td class="${{sideCls}}"><b>${{escapeHtml((r.side||"--").toString())}}</b></td>
+            <td>${{fmtNum(r.price, 3)}}</td>
+            <td>${{fmtNum(r.size, 2)}}</td>
+            <td class="mono small">${{escapeHtml(strat)}}</td>
+          `;
+          tb.appendChild(tr);
+        }}
+      }}
+
+      function renderQuotes(rows) {{
+        const tb = document.getElementById("quoteRows");
+        tb.innerHTML = "";
+        for (const r of rows) {{
+          const bid = Number(r.tob_best_bid);
+          const ask = Number(r.tob_best_ask);
+          const spread = (Number.isFinite(bid) && Number.isFinite(ask)) ? (ask - bid) : null;
+          const inv = Number(r.inv_qty ?? 0);
+          const src = (r.fair_source || "--").toString();
+          const q = (r.question || "").toString();
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td class="mono">${{escapeHtml((r.market_id||"--").toString())}}</td>
+            <td>
+              <div style="font-weight:800; line-height:1.2;">${{escapeHtml(q).slice(0, 90) || "--"}}</div>
+              <div class="row2">src: <span class="mono">${{escapeHtml(src)}}</span> • updated ${{fmtAgo(r.ts)}}</div>
+            </td>
+            <td>${{fmtNum(r.mid, 3)}}</td>
+            <td>${{fmtNum(spread, 3)}}</td>
+            <td>${{fmtNum(r.fair, 3)}}</td>
+            <td>${{fmtNum(r.target_bid, 3)}}</td>
+            <td>${{fmtNum(r.target_ask, 3)}}</td>
+            <td>${{fmtNum(inv, 2)}}</td>
           `;
           tb.appendChild(tr);
         }}
@@ -591,11 +690,13 @@ def build_app(settings: Any, store: Any) -> FastAPI:
 
       async function refresh() {{
         try {{
-          const [summary, watch, pos, flat, orders, fills, pubs] = await Promise.all([
+          const [summary, watch, pos, flat, quotes, openOrders, orders, fills, pubs] = await Promise.all([
             getJson("/api/summary"),
             getJson("/api/watchlist?limit=30"),
             getJson("/api/positions?limit=20"),
             getJson("/api/positions?limit=20&only_flat=1"),
+            getJson("/api/quotes?limit=20"),
+            getJson("/api/open_orders?limit=25"),
             getJson("/api/orders?limit=25"),
             getJson("/api/fills?limit=25"),
             getJson("/api/publishers"),
@@ -625,6 +726,7 @@ def build_app(settings: Any, store: Any) -> FastAPI:
           document.getElementById("pnlTotal").className = "val " + (total >= 0 ? "good" : "bad");
           document.getElementById("pnlU").textContent = fmtUsd(pnl.total_unrealized ?? 0);
           document.getElementById("pnlR").textContent = fmtUsd(pnl.total_realized ?? 0);
+          document.getElementById("pnlMeta").textContent = pnl.ts ? ("updated " + fmtAgo(pnl.ts)) : "no pnl snapshot yet";
 
           document.getElementById("posCount").textContent = String(summary.positions_count ?? 0);
 
@@ -648,6 +750,8 @@ def build_app(settings: Any, store: Any) -> FastAPI:
           renderWatch(watch);
           renderPositions(pos);
           renderFlat(flat);
+          renderQuotes(quotes);
+          renderOpenOrders(openOrders);
           renderOrders(orders);
           renderFills(fills);
           renderPublishers(pubs);
@@ -738,6 +842,14 @@ def build_app(settings: Any, store: Any) -> FastAPI:
     @app.get("/api/orders", response_class=JSONResponse)
     def orders(limit: int = 50) -> list[dict[str, Any]]:
         return store.fetch_recent_orders(limit=int(limit))
+
+    @app.get("/api/open_orders", response_class=JSONResponse)
+    def open_orders(limit: int = 50) -> list[dict[str, Any]]:
+        return store.fetch_recent_orders(limit=int(limit), status="open")
+
+    @app.get("/api/quotes", response_class=JSONResponse)
+    def quotes(limit: int = 25) -> list[dict[str, Any]]:
+        return store.fetch_latest_quotes(limit=int(limit))
 
     @app.get("/api/fills", response_class=JSONResponse)
     def fills(limit: int = 100) -> list[dict[str, Any]]:

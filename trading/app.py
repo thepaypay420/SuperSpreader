@@ -259,7 +259,23 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
     async def snapshot_loop() -> None:
         while True:
             await asyncio.sleep(1.0)
-            await _persist_snapshots(ctx)
+            try:
+                await _persist_snapshots(ctx)
+                store.upsert_runtime_status(
+                    component="snapshots",
+                    level="ok",
+                    message="portfolio snapshots ok",
+                    ts=time.time(),
+                )
+            except Exception:
+                log.exception("snapshots.error")
+                store.upsert_runtime_status(
+                    component="snapshots",
+                    level="error",
+                    message="snapshot loop failed (PnL/positions may look stuck)",
+                    detail="see logs for stacktrace",
+                    ts=time.time(),
+                )
 
     async def unwind_loop() -> None:
         await _inventory_unwind_loop(ctx)
