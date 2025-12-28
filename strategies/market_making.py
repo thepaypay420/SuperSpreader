@@ -6,7 +6,7 @@ import time
 from execution.base import OrderRequest
 from strategies.base import Strategy, StrategyContext
 from utils.logging import get_logger
-from utils.pricing import clamp, prob_to_price
+from utils.pricing import bps_to_decimal, clamp, prob_to_price
 
 
 class MarketMakingStrategy(Strategy):
@@ -17,6 +17,23 @@ class MarketMakingStrategy(Strategy):
         # market_id -> {"bid": order_id, "ask": order_id}
         self._quotes: dict[str, dict[str, str]] = {}
         self._quote_meta: dict[str, dict[str, float]] = {}  # market_id -> {"bid_ts":..., "ask_ts":...}
+
+    async def _cancel_quotes(self, ctx: StrategyContext, market_id: str) -> None:
+        """
+        Best-effort: cancel any currently tracked quotes for a market.
+        Used when the market becomes structurally unprofitable (e.g. spread too tight vs fees).
+        """
+        q = self._quotes.get(market_id) or {}
+        oids = [q.get("bid"), q.get("ask")]
+        for oid in oids:
+            if oid:
+                try:
+                    await ctx.broker.cancel(str(oid))
+                except Exception:
+                    # Never break the trading loop due to a cancel failure.
+                    pass
+        q.pop("bid", None)
+        q.pop("ask", None)
 
     async def on_market(self, ctx: StrategyContext, market_id: str) -> None:
         async with ctx.state.lock:
@@ -34,6 +51,25 @@ class MarketMakingStrategy(Strategy):
             tick = 0.001
 
         mid = 0.5 * (tob.best_bid + tob.best_ask)
+        spread = float(tob.best_ask) - float(tob.best_bid)
+        if spread <= 0:
+            return
+
+        # Profitability guardrail:
+        # If the *available* spread is smaller than our estimated round-trip costs (fees + slippage + latency),
+        # market-making at/near the touch is structurally negative expectancy.
+        # Example from telemetry: quoting one tick wide (0.001) around ~0.99 is ~10 bps gross, while fees_bps=20
+        # implies ~40 bps round-trip cost => consistent slow bleed even with many fills.
+        cost_bps = float(getattr(ctx.settings, "fees_bps", 0.0) or 0.0) + float(
+            getattr(ctx.settings, "slippage_bps", 0.0) or 0.0
+        ) + float(getattr(ctx.settings, "latency_bps", 0.0) or 0.0)
+        min_profitable_spread = max(2.0 * tick, 2.0 * float(mid) * float(bps_to_decimal(cost_bps)))
+
+        # If the market is too tight to clear costs, cancel quotes and stand down.
+        # (You can loosen this by lowering FEES_BPS or by switching to a directional/alpha signal.)
+        if spread < min_profitable_spread:
+            await self._cancel_quotes(ctx, market_id)
+            return
         if bool(getattr(ctx.settings, "disallow_mock_data", False)):
             # Strict mode: do not query any external odds provider at all.
             fair = mid
@@ -69,9 +105,13 @@ class MarketMakingStrategy(Strategy):
         # Quote width:
         # - Keep a configured "cap" (mm_quote_width) but don't be unnecessarily wide vs the live spread.
         # - A too-wide width results in quotes far from the touch => almost no fills.
-        spread = float(tob.best_ask) - float(tob.best_bid)
         width_cap = max(float(ctx.settings.mm_quote_width), 2.0 * tick)
-        width = min(width_cap, max(spread + 2.0 * tick, 6.0 * tick))
+        # Start with something at least a few ticks and slightly wider than current TOB.
+        width = max(spread + 2.0 * tick, 6.0 * tick)
+        # Ensure our quote width can plausibly clear estimated round-trip costs.
+        width = max(width, float(min_profitable_spread))
+        # Respect configured maximum width (if it's too small vs costs, we already stood down above).
+        width = min(width, width_cap)
         skew = -inv_frac * float(ctx.settings.mm_inventory_skew) * width
 
         # Target quotes around fair, but:
@@ -84,7 +124,9 @@ class MarketMakingStrategy(Strategy):
         # Inventory-aware guardrail: if we are already significantly long/short, don't force joining
         # the side that would further increase exposure.
         join_touch = bool(getattr(ctx.settings, "mm_join_touch", True))
-        if join_touch:
+        # If the book is only one-tick wide, joining the touch is often *structurally unprofitable* after fees.
+        # Only join when the available spread can cover our estimated costs.
+        if join_touch and spread >= min_profitable_spread:
             if inv_frac <= 0.25:
                 target_bid = max(target_bid, float(tob.best_bid))
             if inv_frac >= -0.25:
@@ -132,7 +174,10 @@ class MarketMakingStrategy(Strategy):
                     "fair": float(fair),
                     "fair_source": str(fair_source),
                     "inv_qty": float(inv),
+                    "spread": float(spread),
                     "width": float(width),
+                    "min_profitable_spread": float(min_profitable_spread),
+                    "cost_bps": float(cost_bps),
                     "skew": float(skew),
                     "target_bid": float(target_bid),
                     "target_ask": float(target_ask),
