@@ -108,6 +108,12 @@ def _normalize_ws_message(msg: dict[str, Any]) -> FeedEvent | None:
     if not isinstance(msg, dict):
         return None
 
+    # `TopOfBook.ts` is used as an observation timestamp (risk feed-lag circuit breaker).
+    # Many WS payloads include an exchange/server timestamp that can remain unchanged when
+    # bestBid/bestAsk don't move. Using it would create false "feed_lag" rejects in quiet
+    # markets even when we're still receiving messages.
+    observed_ts = time.time()
+
     # Common wrapper patterns
     data = msg.get("data") if isinstance(msg.get("data"), dict) else msg
 
@@ -127,7 +133,8 @@ def _normalize_ws_message(msg: dict[str, Any]) -> FeedEvent | None:
                     best_bid_size=float(data.get("bestBidSize") or data.get("bid_size") or data.get("bidSize") or 0.0),
                     best_ask=float(data.get(ask_key)) if data.get(ask_key) is not None else None,
                     best_ask_size=float(data.get("bestAskSize") or data.get("ask_size") or data.get("askSize") or 0.0),
-                    ts=float(data.get("ts") or data.get("timestamp") or time.time()),
+                    # Observation time (local) to avoid false feed-lag rejects.
+                    ts=observed_ts,
                 )
                 return BookEvent(kind="tob", market_id=market_id, tob=tob)
             except Exception:
@@ -136,12 +143,22 @@ def _normalize_ws_message(msg: dict[str, Any]) -> FeedEvent | None:
     # Trade style
     if "trade" in kind or ("price" in data and "size" in data and "side" in data):
         try:
+            raw_ts = data.get("ts") or data.get("timestamp")
+            trade_ts = None
+            if raw_ts is not None:
+                try:
+                    trade_ts = float(raw_ts)
+                except Exception:
+                    trade_ts = None
+            # Heuristic: if looks like ms epoch, convert.
+            if trade_ts is not None and trade_ts > 3_000_000_000:
+                trade_ts = trade_ts / 1000.0
             trade = TradeTick(
                 market_id=market_id,
                 price=float(data["price"]),
                 size=float(data["size"]),
                 side=str(data.get("side", "buy")).lower(),  # type: ignore[assignment]
-                ts=float(data.get("ts") or data.get("timestamp") or time.time()),
+                ts=float(trade_ts if trade_ts is not None else observed_ts),
             )
             if trade.side not in ("buy", "sell"):
                 return None
