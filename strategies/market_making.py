@@ -27,26 +27,32 @@ class MarketMakingStrategy(Strategy):
             return
 
         mid = 0.5 * (tob.best_bid + tob.best_ask)
-        # Fair:
-        # - In production you might center quotes around an external fair value model.
-        # - In this repo's paper/default setup, the ExternalOdds provider is a mock and can be
-        #   completely unrelated to the current book, which would place quotes far away and
-        #   result in no fills/position changes.
-        # So: only trust external fair when it is *not* the mock provider.
-        ext = await ctx.odds.get_fair_prob(m)
-        ext_fair = prob_to_price(ext.fair_prob)
-        ext_source = getattr(ext, "source", None)
-        ext_source_norm = str(ext_source or "").lower()
-        use_mid = ext_source_norm == "mock"
-        fair = mid if use_mid else ext_fair
-        fair_source = "book_mid" if use_mid else (ext_source or "external")
+        if bool(getattr(ctx.settings, "disallow_mock_data", False)):
+            # Strict mode: do not query any external odds provider at all.
+            fair = mid
+            fair_source = "book_mid"
+            meta = {"strategy": self.name, "fair": fair, "mid": mid, "source": fair_source}
+        else:
+            # Fair:
+            # - In production you might center quotes around an external fair value model.
+            # - In this repo's paper/default setup, the ExternalOdds provider is a mock and can be
+            #   completely unrelated to the current book, which would place quotes far away and
+            #   result in no fills/position changes.
+            # So: only trust external fair when it is *not* the mock provider.
+            ext = await ctx.odds.get_fair_prob(m)
+            ext_fair = prob_to_price(ext.fair_prob)
+            ext_source = getattr(ext, "source", None)
+            ext_source_norm = str(ext_source or "").lower()
+            use_mid = ext_source_norm == "mock"
+            fair = mid if use_mid else ext_fair
+            fair_source = "book_mid" if use_mid else (ext_source or "external")
 
-        # Meta:
-        # - When we fall back to book_mid (mock external odds), do not propagate/log "external_source":"mock"
-        #   since the quote was not derived from an external fair.
-        meta = {"strategy": self.name, "fair": fair, "mid": mid, "source": fair_source}
-        if not use_mid and ext_source is not None:
-            meta["external_source"] = ext_source
+            # Meta:
+            # - When we fall back to book_mid (mock external odds), do not propagate/log "external_source":"mock"
+            #   since the quote was not derived from an external fair.
+            meta = {"strategy": self.name, "fair": fair, "mid": mid, "source": fair_source}
+            if not use_mid and ext_source is not None:
+                meta["external_source"] = ext_source
 
         # Inventory skew: shift quotes away from current inventory direction
         pos = ctx.portfolio.positions.get(market_id)
