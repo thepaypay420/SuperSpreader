@@ -121,6 +121,27 @@ class SqliteStore:
                   total_pnl REAL
                 );
 
+                -- Per-market quoting telemetry (for dashboard clarity)
+                CREATE TABLE IF NOT EXISTS quote_snapshots (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  ts REAL,
+                  market_id TEXT,
+                  event_id TEXT,
+                  tob_best_bid REAL,
+                  tob_best_ask REAL,
+                  mid REAL,
+                  fair REAL,
+                  fair_source TEXT,
+                  inv_qty REAL,
+                  width REAL,
+                  skew REAL,
+                  target_bid REAL,
+                  target_ask REAL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_quotes_ts ON quote_snapshots(ts);
+                CREATE INDEX IF NOT EXISTS idx_quotes_market ON quote_snapshots(market_id, ts);
+
                 -- Scanner/watchlist for monitoring UI
                 CREATE TABLE IF NOT EXISTS scanner_snapshots (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -321,6 +342,41 @@ class SqliteStore:
             )
             self._conn.commit()
 
+    def insert_quote_snapshot(self, snap: dict[str, Any]) -> None:
+        """
+        Persist a single per-market quote snapshot. Used by strategies to make the
+        dashboard explain *what we are quoting* (fair/mid/spread/targets/inventory).
+        """
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO quote_snapshots(
+                  ts, market_id, event_id,
+                  tob_best_bid, tob_best_ask,
+                  mid, fair, fair_source,
+                  inv_qty, width, skew,
+                  target_bid, target_ask
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    float(snap["ts"]),
+                    str(snap["market_id"]),
+                    str(snap.get("event_id") or f"event:{snap['market_id']}"),
+                    snap.get("tob_best_bid"),
+                    snap.get("tob_best_ask"),
+                    snap.get("mid"),
+                    snap.get("fair"),
+                    snap.get("fair_source"),
+                    snap.get("inv_qty"),
+                    snap.get("width"),
+                    snap.get("skew"),
+                    snap.get("target_bid"),
+                    snap.get("target_ask"),
+                ),
+            )
+            self._conn.commit()
+
     def fetch_latest_positions(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
             # IMPORTANT:
@@ -456,17 +512,29 @@ class SqliteStore:
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
-    def fetch_recent_orders(self, limit: int = 100) -> list[dict[str, Any]]:
+    def fetch_recent_orders(self, limit: int = 100, *, status: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
-            cur = self._conn.execute(
-                """
-                SELECT order_id, market_id, side, price, size, created_ts, status, filled_size, meta_json
-                FROM orders
-                ORDER BY created_ts DESC
-                LIMIT ?
-                """,
-                (int(limit),),
-            )
+            if status is None:
+                cur = self._conn.execute(
+                    """
+                    SELECT order_id, market_id, side, price, size, created_ts, status, filled_size, meta_json
+                    FROM orders
+                    ORDER BY created_ts DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                )
+            else:
+                cur = self._conn.execute(
+                    """
+                    SELECT order_id, market_id, side, price, size, created_ts, status, filled_size, meta_json
+                    FROM orders
+                    WHERE status = ?
+                    ORDER BY created_ts DESC
+                    LIMIT ?
+                    """,
+                    (str(status), int(limit)),
+                )
             cols = [c[0] for c in cur.description]
             out: list[dict[str, Any]] = []
             for row in cur.fetchall():
@@ -477,6 +545,40 @@ class SqliteStore:
                     d["meta"] = {}
                 out.append(d)
             return out
+
+    def fetch_latest_quotes(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                WITH latest AS (
+                  SELECT market_id, MAX(id) AS id_max
+                  FROM quote_snapshots
+                  GROUP BY market_id
+                )
+                SELECT q.market_id,
+                       q.event_id,
+                       q.tob_best_bid,
+                       q.tob_best_ask,
+                       q.mid,
+                       q.fair,
+                       q.fair_source,
+                       q.inv_qty,
+                       q.width,
+                       q.skew,
+                       q.target_bid,
+                       q.target_ask,
+                       q.ts,
+                       m.question
+                FROM quote_snapshots q
+                JOIN latest ON latest.id_max = q.id
+                LEFT JOIN markets m ON m.market_id = q.market_id
+                ORDER BY q.ts DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def fetch_recent_fills(self, limit: int = 200) -> list[dict[str, Any]]:
         with self._lock:
