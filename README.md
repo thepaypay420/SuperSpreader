@@ -137,6 +137,18 @@ Two useful knobs for bridging the gap between paper and production microstructur
   - `PAPER_FILL_MODEL=trade_through`
   - Optionally `PAPER_MIN_REST_SECS=1.0` to require orders rest before they can fill.
 
+### Inventory controls (reduce “dozens of open positions” risk)
+
+Two optional guardrails (disabled by default):
+
+- **Max open positions** (blocks opening new markets once you hit the cap; reduce-only still allowed):
+  - `MAX_OPEN_POSITIONS=25` (example)
+
+- **Auto-unwind old positions** (attempts to flatten positions older than a limit):
+  - `MAX_POS_AGE_SECS=1800` (example: 30 minutes)
+  - `UNWIND_INTERVAL_SECS=10`
+  - `UNWIND_MAX_MARKETS_PER_CYCLE=2`
+
 ### Tests
 
 ```bash

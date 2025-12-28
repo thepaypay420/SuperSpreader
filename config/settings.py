@@ -157,6 +157,10 @@ class Settings:
 
     # Risk
     max_pos_per_market: float
+    max_open_positions: int
+    max_pos_age_secs: float
+    unwind_interval_secs: float
+    unwind_max_markets_per_cycle: int
     max_event_exposure: float
     daily_loss_limit: float
     kill_switch: bool
@@ -274,6 +278,10 @@ class Settings:
             paper_fill_model=paper_fill_model,
             paper_min_rest_secs=_get_float("PAPER_MIN_REST_SECS", 0.0),
             max_pos_per_market=_get_float("MAX_POS_PER_MARKET", 200.0),
+            max_open_positions=_get_int("MAX_OPEN_POSITIONS", 0),
+            max_pos_age_secs=_get_float("MAX_POS_AGE_SECS", 0.0),
+            unwind_interval_secs=_get_float("UNWIND_INTERVAL_SECS", 10.0),
+            unwind_max_markets_per_cycle=_get_int("UNWIND_MAX_MARKETS_PER_CYCLE", 2),
             max_event_exposure=_get_float("MAX_EVENT_EXPOSURE", 500.0),
             daily_loss_limit=_get_float("DAILY_LOSS_LIMIT", 200.0),
             kill_switch=_get_bool("KILL_SWITCH", False),
