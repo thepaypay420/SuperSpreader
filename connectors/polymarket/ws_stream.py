@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import time
 from dataclasses import asdict
 from typing import Any, AsyncIterator, Iterable
@@ -56,6 +57,8 @@ class PolymarketClobWebSocketStream:
                     # We run our own keepalive loop to be explicit/portable across WS servers.
                     ping_interval=None,
                     ping_timeout=None,
+                    # Polymarket can send large book snapshots; avoid client-side close on size.
+                    max_size=16 * 1024 * 1024,
                     open_timeout=10,
                     close_timeout=5,
                 ) as ws:
@@ -146,7 +149,29 @@ class PolymarketClobWebSocketStream:
                                 await resub()
                                 raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
                             except asyncio.TimeoutError:
+                                # If the socket is half-open (common on flaky networks), recv() may
+                                # keep timing out. Do a quick control-frame ping; if it fails,
+                                # reconnect cleanly.
+                                try:
+                                    pong_waiter = ws.ping()
+                                    await asyncio.wait_for(pong_waiter, timeout=5.0)
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception:
+                                    self._log.warning("ws.stale_reconnect", url=self.ws_url)
+                                    break
                                 continue
+                            except asyncio.CancelledError:
+                                raise
+                            except websockets.exceptions.ConnectionClosed as e:
+                                # Expected transient condition (server/network dropped without close frame).
+                                self._log.warning(
+                                    "ws.disconnected",
+                                    url=self.ws_url,
+                                    code=getattr(e, "code", None),
+                                    reason=getattr(e, "reason", None),
+                                )
+                                break
                             if not raw:
                                 continue
                             try:
@@ -187,7 +212,17 @@ class PolymarketClobWebSocketStream:
                         except Exception:
                             pass
             except Exception as e:
-                self._log.exception("ws.error", url=self.ws_url, backoff=backoff)
+                # Treat "connection closed" as a normal reconnect condition (no stacktrace).
+                if isinstance(e, websockets.exceptions.ConnectionClosed):
+                    self._log.warning(
+                        "ws.reconnect",
+                        url=self.ws_url,
+                        backoff=backoff,
+                        code=getattr(e, "code", None),
+                        reason=getattr(e, "reason", None),
+                    )
+                else:
+                    self._log.exception("ws.error", url=self.ws_url, backoff=backoff)
                 # Keep dashboard concise: record short error + URL.
                 self._store.upsert_runtime_status(
                     component="feed.ws",
@@ -196,7 +231,8 @@ class PolymarketClobWebSocketStream:
                     detail=f"url={self.ws_url} backoff={backoff} err={type(e).__name__}:{str(e)[:180]}",
                     ts=time.time(),
                 )
-                await asyncio.sleep(backoff)
+                # Add jitter so multiple workers don't herd-reconnect.
+                await asyncio.sleep(backoff + random.random() * 0.25)
                 backoff = min(30.0, backoff * 2.0)
 
 
