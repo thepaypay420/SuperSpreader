@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from types import SimpleNamespace
 
 from connectors.polymarket.market_discovery import PolymarketMarketDiscovery
 from connectors.polymarket.ws_stream import PolymarketClobWebSocketStream
 from storage.sqlite import SqliteStore
+from utils.logging import configure_logging
 
 
 async def main() -> None:
@@ -14,6 +16,17 @@ async def main() -> None:
     ws_url = os.getenv("POLYMARKET_WS", "wss://ws-subscriptions-clob.polymarket.com/ws/market").strip()
     seconds = float(os.getenv("WS_SMOKE_SECS", "15"))
     top_n = int(os.getenv("WS_SMOKE_TOP_N", "20"))
+
+    # Enable logging so we can see ws.connected/ws.server_error/etc.
+    configure_logging(
+        SimpleNamespace(
+            log_level=os.getenv("LOG_LEVEL", "INFO"),
+            json_logs=True,
+            log_file=None,
+            log_max_bytes=0,
+            log_backup_count=0,
+        )
+    )
 
     store = SqliteStore(":memory:")
     store.init_db()
@@ -46,14 +59,27 @@ async def main() -> None:
     def provider():
         return subs
 
-    async for ev in feed.events(provider):
-        n += 1
-        kinds[ev.kind] = kinds.get(ev.kind, 0) + 1
-        markets_seen.add(ev.market_id)
-        if n <= 5:
-            print({"ts": time.time(), "event": ev.kind, "market_id": ev.market_id})
-        if time.time() - start >= seconds:
-            break
+    async def consume() -> None:
+        nonlocal n
+        async for ev in feed.events(provider):
+            n += 1
+            kinds[ev.kind] = kinds.get(ev.kind, 0) + 1
+            markets_seen.add(ev.market_id)
+            if n <= 5:
+                print({"ts": time.time(), "event": ev.kind, "market_id": ev.market_id})
+
+    task = asyncio.create_task(consume())
+    try:
+        # Hard stop even if we never get an event.
+        await asyncio.sleep(seconds)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
 
     print(
         {
@@ -64,6 +90,11 @@ async def main() -> None:
             "markets_seen": len(markets_seen),
         }
     )
+    # Also show the last-known feed statuses.
+    try:
+        print({"runtime_status": store.fetch_runtime_statuses()})
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

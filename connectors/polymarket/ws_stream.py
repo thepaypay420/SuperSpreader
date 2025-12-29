@@ -61,6 +61,10 @@ class PolymarketClobWebSocketStream:
                     max_size=16 * 1024 * 1024,
                     open_timeout=10,
                     close_timeout=5,
+                    # Some WS stacks (Cloudflare/front-door) behave differently without an Origin.
+                    # Browsers always send it; setting it here makes the public market feed behave
+                    # consistently across environments.
+                    origin="https://polymarket.com",
                 ) as ws:
                     self._log.info("ws.connected", url=self.ws_url)
                     self._store.upsert_runtime_status(
@@ -99,11 +103,13 @@ class PolymarketClobWebSocketStream:
                     # Track subscribed asset ids (MARKET channel).
                     subscribed_assets: set[str] = set()
                     asset_to_market_id: dict[str, str] = {}
+                    rx_frames = 0
                     rx_msgs = 0
                     rx_events = 0
                     last_rx_log_ts = 0.0
                     # Debug helpers: make sure protocol/schema issues are visible.
                     unparsed_samples_left = 3
+                    nonjson_samples_left = 3
                     last_msg_ts = time.time()
                     last_event_ts = 0.0
 
@@ -116,7 +122,7 @@ class PolymarketClobWebSocketStream:
                             for row in want:
                                 try:
                                     mid = str(row.get("market_id") or "").strip()
-                                    aid = str(row.get("asset_id") or "").strip()
+                                    aid = str(row.get("asset_id") or "").strip().strip("'\"")
                                 except Exception:
                                     continue
                                 if not mid or not aid:
@@ -140,17 +146,11 @@ class PolymarketClobWebSocketStream:
                         # The accepted shape is:
                         #   {"action":"subscribe","type":"MARKET","assets_ids":[...]}
                         # where `assets_ids` are CLOB token IDs.
-                        # Polymarket has changed this field name in the past; in the wild you can
-                        # see `asset_ids` or `assets_ids`. Sending both variants keeps us resilient
-                        # and makes failures non-silent because the server typically replies with
-                        # an error payload we now log.
-                        assets = list(new_assets)
-                        msgs = [
-                            {"action": "subscribe", "type": "MARKET", "asset_ids": assets},
-                            {"action": "subscribe", "type": "MARKET", "assets_ids": assets},
-                        ]
-                        for m in msgs:
-                            await ws.send(json.dumps(m))
+                        # Current Polymarket /ws/market endpoint expects `assets_ids` (plural).
+                        # Sending other variants can cause the server to respond with
+                        # "INVALID OPERATION" and (in some deployments) prevents further delivery.
+                        msg = {"action": "subscribe", "type": "MARKET", "assets_ids": list(new_assets)}
+                        await ws.send(json.dumps(msg))
                         subscribed_assets |= new_assets
                         self._log.info("ws.subscribed", assets=len(subscribed_assets))
 
@@ -187,9 +187,29 @@ class PolymarketClobWebSocketStream:
                                 break
                             if not raw:
                                 continue
+                            rx_frames += 1
                             try:
                                 msg = json.loads(raw)
                             except Exception:
+                                if nonjson_samples_left > 0:
+                                    nonjson_samples_left -= 1
+                                    try:
+                                        if isinstance(raw, (bytes, bytearray)):
+                                            preview = raw[:200].hex()
+                                            self._log.warning(
+                                                "ws.non_json_frame",
+                                                kind="bytes",
+                                                n_bytes=len(raw),
+                                                preview_hex=preview,
+                                            )
+                                        else:
+                                            self._log.warning(
+                                                "ws.non_json_frame",
+                                                kind=str(type(raw)),
+                                                preview=str(raw)[:500],
+                                            )
+                                    except Exception:
+                                        pass
                                 continue
                             rx_msgs += 1
                             last_msg_ts = time.time()
@@ -212,6 +232,7 @@ class PolymarketClobWebSocketStream:
                                 last_rx_log_ts = now
                                 self._log.info(
                                     "ws.rx",
+                                    frames=rx_frames,
                                     msgs=rx_msgs,
                                     events=rx_events,
                                     assets=len(subscribed_assets),
@@ -220,7 +241,7 @@ class PolymarketClobWebSocketStream:
                                     component="feed.ws.rx",
                                     level="ok",
                                     message="websocket receiving",
-                                    detail=f"msgs={rx_msgs} events={rx_events} assets={len(subscribed_assets)}",
+                                    detail=f"frames={rx_frames} msgs={rx_msgs} events={rx_events} assets={len(subscribed_assets)}",
                                     ts=now,
                                 )
 
