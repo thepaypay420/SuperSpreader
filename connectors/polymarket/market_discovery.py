@@ -65,9 +65,12 @@ class PolymarketMarketDiscovery:
                 outcomes = m.get("outcomes") or []
                 if isinstance(tok_ids, str):
                     # Some APIs return JSON-stringified list.
-                    tok_ids = [x.strip() for x in tok_ids.strip("[]").split(",") if x.strip()]
+                    tok_ids = [x.strip().strip("'\"") for x in tok_ids.strip("[]").split(",") if x.strip()]
                 if isinstance(outcomes, str):
                     outcomes = [x.strip() for x in outcomes.strip("[]").split(",") if x.strip()]
+                if isinstance(tok_ids, list) and tok_ids:
+                    # Normalize token ids (API responses sometimes include quoted strings).
+                    tok_ids = [str(x).strip().strip("'\"") for x in tok_ids if str(x).strip()]
                 if isinstance(tok_ids, list) and tok_ids:
                     # Prefer the "Yes" token if we can find it.
                     idx = 0
