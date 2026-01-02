@@ -455,7 +455,7 @@ fn build_orderbooks_request(tokens: &[String]) -> Vec<GetOrderBooksRequestItem> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polymarket_hft::client::polymarket::clob::ws::{BookMessage, WsPriceLevel};
+    use polymarket_hft::client::polymarket::clob::ws::{BookMessage, LastTradePriceMessage, WsPriceLevel};
 
     #[test]
     fn orderbook_poll_request_has_no_side_filter() {
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_book_message_updates_tob_state_with_bid_ask() {
+    fn ws_book_and_last_trade_events_update_tob_state() {
         let state = FeedState::new();
         let routes = std::sync::Arc::new(RwLock::new(Routes::default()));
 
@@ -478,7 +478,8 @@ mod tests {
             .by_condition
             .insert("0xcond".to_string(), "516926".to_string());
 
-        let msg = WsMessage::Book(BookMessage {
+        // First book snapshot.
+        let msg1 = WsMessage::Book(BookMessage {
             event_type: "book".to_string(),
             asset_id: "token_yes".to_string(),
             market: "0xcond".to_string(),
@@ -495,11 +496,43 @@ mod tests {
         });
 
         let mut last_update_ts: HashMap<String, f64> = HashMap::new();
-        handle_ws_message(&state, &routes, &mut last_update_ts, msg).unwrap();
+        handle_ws_message(&state, &routes, &mut last_update_ts, msg1).unwrap();
 
         let tob = state.get("516926").expect("tob should be upserted");
         assert_eq!(tob.best_bid, Some(0.49));
         assert_eq!(tob.best_ask, Some(0.51));
         assert!(tob.mid().is_some());
+        assert!(tob.ts > 1_000_000_000.0, "timestamp should be converted to seconds");
+
+        // Second book snapshot slightly later: should bump EWMA updates/min above zero.
+        let msg2 = WsMessage::Book(BookMessage {
+            event_type: "book".to_string(),
+            asset_id: "token_yes".to_string(),
+            market: "0xcond".to_string(),
+            bids: vec![WsPriceLevel { price: "0.490".to_string(), size: "12".to_string() }],
+            asks: vec![WsPriceLevel { price: "0.510".to_string(), size: "11".to_string() }],
+            timestamp: "1700000000500".to_string(), // +500ms
+            hash: "h2".to_string(),
+        });
+        handle_ws_message(&state, &routes, &mut last_update_ts, msg2).unwrap();
+        let tob2 = state.get("516926").expect("tob should still exist");
+        assert!(tob2.updates_ewma_per_min > 0.0, "should compute a non-zero updates/min EWMA");
+
+        // Last trade event: should update last_trade_ema/ts but not overwrite book ts.
+        let trade = WsMessage::LastTradePrice(LastTradePriceMessage {
+            event_type: "last_trade_price".to_string(),
+            asset_id: "token_yes".to_string(),
+            market: "0xcond".to_string(),
+            price: "0.505".to_string(),
+            side: polymarket_hft::client::polymarket::clob::ws::Side::Buy,
+            size: "1.0".to_string(),
+            fee_rate_bps: "0".to_string(),
+            timestamp: "1700000000600".to_string(),
+        });
+        handle_ws_message(&state, &routes, &mut last_update_ts, trade).unwrap();
+        let tob3 = state.get("516926").expect("tob should still exist");
+        assert!(tob3.last_trade_ema.is_some());
+        assert!(tob3.last_trade_ts.is_some());
+        assert_eq!(tob3.ts, tob2.ts, "last trade should not overwrite book freshness ts");
     }
 }
