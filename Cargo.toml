@@ -31,3 +31,11 @@ base64ct = "=1.7.1"
  [profile.release]
  lto = true
  codegen-units = 1
+
+# Proc-macros (like `derive_more-impl`) are built as part of the host toolchain.
+# Building them fully optimized in `--release` can be slower and has occasionally
+# triggered toolchain-specific crashes on Windows. Keep them unoptimized while
+# still building the final binary with LTO.
+[profile.release.build-override]
+opt-level = 0
+codegen-units = 16
