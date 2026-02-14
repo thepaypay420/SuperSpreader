@@ -251,6 +251,14 @@ class Settings:
     five_min_require_trend: bool
     five_min_require_rsi: bool
 
+    # ── BTC Up/Down 5m Binary Markets ──
+    enable_btc_updown: bool             # enable BTC 5m up/down strategy
+    btc_price_poll_secs: float          # how often to poll BTC/USD price
+    btc_price_source: str               # live|mock
+    btc_updown_min_confidence: float    # minimum confidence to place a bet (0-1)
+    btc_updown_discovery_secs: float    # how often to check for new BTC 5m markets
+    btc_bootstrap_klines: bool          # bootstrap candle history from Binance klines
+
     _overrides: dict[str, str] | None = None
 
     @staticmethod
@@ -410,6 +418,13 @@ class Settings:
             five_min_require_vwap=_get_bool("FIVE_MIN_REQUIRE_VWAP", True),
             five_min_require_trend=_get_bool("FIVE_MIN_REQUIRE_TREND", True),
             five_min_require_rsi=_get_bool("FIVE_MIN_REQUIRE_RSI", True),
+            # BTC Up/Down 5m
+            enable_btc_updown=_get_bool("ENABLE_BTC_UPDOWN", True),
+            btc_price_poll_secs=_get_float("BTC_PRICE_POLL_SECS", 5.0),
+            btc_price_source=(_get_env("BTC_PRICE_SOURCE", "live") or "live").strip().lower(),
+            btc_updown_min_confidence=_get_float("BTC_UPDOWN_MIN_CONFIDENCE", 0.55),
+            btc_updown_discovery_secs=_get_float("BTC_UPDOWN_DISCOVERY_SECS", 30.0),
+            btc_bootstrap_klines=_get_bool("BTC_BOOTSTRAP_KLINES", True),
         )
 
     def as_dict(self) -> dict[str, Any]:

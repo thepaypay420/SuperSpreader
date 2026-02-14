@@ -4,8 +4,10 @@ import asyncio
 import time
 from typing import Any
 
+from connectors.btc_price_feed import BtcPriceFeed, BtcKlineFeed, MockBtcPriceFeed
 from connectors.external_odds.mock import MockOddsProvider
 from connectors.external_odds.disabled import DisabledOddsProvider
+from connectors.polymarket.btc_5m_discovery import BtcFiveMinDiscovery
 from connectors.polymarket.market_discovery import PolymarketMarketDiscovery
 from connectors.polymarket.gamma_poll_stream import PolymarketGammaPollStream
 from connectors.polymarket.mock_stream import MockPolymarketStream
@@ -18,10 +20,11 @@ from risk.portfolio import Position
 from risk.rules import RiskEngine
 from storage.sqlite import SqliteStore
 from strategies.base import StrategyContext
+from strategies.btc_updown import BtcUpDownStrategy
 from strategies.cross_venue import CrossVenueFairValueStrategy
 from strategies.five_min_chart import FiveMinuteChartStrategy
 from strategies.market_making import MarketMakingStrategy
-from trading.candles import CandleAggregator
+from trading.candles import CandleAggregator, Candle
 from trading.feed import BookEvent, FeedEvent, TradeEvent
 from trading.state import SharedState
 from trading.types import Fill, MarketInfo, TopOfBook, TradeTick
@@ -368,7 +371,173 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
     async def unwind_loop() -> None:
         await _inventory_unwind_loop(ctx)
 
-    await asyncio.gather(scanner_loop(), feed_loop(), strategy_loop(), snapshot_loop(), unwind_loop())
+    # ── BTC Up/Down 5m Binary Strategy loops ──
+    enable_btc_updown = bool(getattr(settings, "enable_btc_updown", True))
+    btc_updown_strat: BtcUpDownStrategy | None = None
+    btc_discovery: BtcFiveMinDiscovery | None = None
+    btc_price_source = str(getattr(settings, "btc_price_source", "live") or "live").strip().lower()
+
+    if enable_btc_updown:
+        btc_updown_strat = BtcUpDownStrategy(
+            candle_agg,
+            fast_ema=int(getattr(settings, "five_min_fast_ema", 9)),
+            slow_ema=int(getattr(settings, "five_min_slow_ema", 21)),
+            trend_ema=int(getattr(settings, "five_min_trend_ema", 50)),
+            rsi_period=int(getattr(settings, "five_min_rsi_period", 14)),
+            atr_period=int(getattr(settings, "five_min_atr_period", 14)),
+            min_candles_for_signal=int(getattr(settings, "five_min_min_candles", 55)),
+            min_confidence=float(getattr(settings, "btc_updown_min_confidence", 0.55)),
+            require_vwap=bool(getattr(settings, "five_min_require_vwap", True)),
+            require_trend=bool(getattr(settings, "five_min_require_trend", True)),
+            require_rsi=bool(getattr(settings, "five_min_require_rsi", True)),
+        )
+        btc_discovery = BtcFiveMinDiscovery()
+
+        log.info(
+            "strategy.btc_updown.enabled",
+            price_source=btc_price_source,
+            min_confidence=settings.btc_updown_min_confidence,
+            candle_interval=candle_interval,
+        )
+
+    async def btc_price_feed_loop() -> None:
+        """
+        Stream BTC/USD prices into the candle aggregator.
+        This builds our 5-minute candle history for indicators.
+        """
+        if btc_updown_strat is None:
+            return
+
+        # Bootstrap candle history from exchange klines on startup
+        if bool(getattr(settings, "btc_bootstrap_klines", True)):
+            try:
+                kline_feed = BtcKlineFeed()
+                interval_str = "5m" if candle_interval == 300 else f"{int(candle_interval / 60)}m"
+                klines = await kline_feed.fetch_klines(interval=interval_str, limit=200)
+                btc_mid = btc_updown_strat.BTC_CANDLE_MARKET_ID
+                for k in klines:
+                    # Feed each kline as a series of price points to build candle history
+                    candle_agg.on_price(btc_mid, k.open, ts=k.open_ts + 1.0)
+                    candle_agg.on_price(btc_mid, k.high, ts=k.open_ts + 60.0)
+                    candle_agg.on_price(btc_mid, k.low, ts=k.open_ts + 120.0)
+                    candle_agg.on_trade(btc_mid, k.close, k.volume, ts=k.close_ts - 1.0)
+                    # Force close the candle by feeding a price in the next bucket
+                completed_candles = candle_agg.get_history(btc_mid)
+                log.info(
+                    "btc_updown.klines_bootstrapped",
+                    candles_loaded=len(completed_candles),
+                    interval=interval_str,
+                )
+            except Exception:
+                log.exception("btc_updown.klines_bootstrap_error")
+
+        # Stream live prices
+        if btc_price_source == "mock":
+            price_feed = MockBtcPriceFeed(poll_secs=float(getattr(settings, "btc_price_poll_secs", 5.0)))
+        else:
+            price_feed = BtcPriceFeed(poll_secs=float(getattr(settings, "btc_price_poll_secs", 5.0)))
+
+        btc_mid = btc_updown_strat.BTC_CANDLE_MARKET_ID
+        async for snap in price_feed.stream_prices():
+            try:
+                completed = candle_agg.on_trade(btc_mid, snap.price, 1.0, ts=snap.ts)
+                for candle in completed:
+                    store.insert_candle(candle.as_dict())
+                    log.info(
+                        "btc_candle.closed",
+                        open=round(candle.open, 2),
+                        high=round(candle.high, 2),
+                        low=round(candle.low, 2),
+                        close=round(candle.close, 2),
+                        volume=round(candle.volume, 2),
+                        candles_total=len(candle_agg.get_history(btc_mid)),
+                    )
+            except Exception:
+                log.exception("btc_price_feed.process_error")
+
+    async def btc_updown_betting_loop() -> None:
+        """
+        Periodically discover new BTC 5m markets and place directional bets.
+        """
+        if btc_updown_strat is None or btc_discovery is None:
+            return
+
+        discovery_interval = float(getattr(settings, "btc_updown_discovery_secs", 30.0))
+
+        while True:
+            try:
+                # Discover the next available BTC 5m market
+                btc_market = await btc_discovery.fetch_upcoming()
+                if btc_market is None:
+                    log.info("btc_updown.no_market_available")
+                    await asyncio.sleep(discovery_interval)
+                    continue
+
+                # Register the market in shared state so risk engine can see it
+                market_info = btc_market.to_market_info()
+                async with state.lock:
+                    state.markets[btc_market.market_id] = market_info
+                    if btc_market.market_id not in state.ranked_markets:
+                        state.ranked_markets.append(btc_market.market_id)
+                    # Set TOB from the discovery data
+                    if btc_market.best_bid is not None and btc_market.best_ask is not None:
+                        state.tob[btc_market.market_id] = TopOfBook(
+                            best_bid=btc_market.best_bid,
+                            best_bid_size=1000.0,
+                            best_ask=btc_market.best_ask,
+                            best_ask_size=1000.0,
+                            ts=time.time(),
+                        )
+
+                store.upsert_markets([{
+                    "market_id": btc_market.market_id,
+                    "question": btc_market.question,
+                    "event_id": btc_market.event_id,
+                    "active": btc_market.active,
+                    "end_ts": btc_market.event_end_ts,
+                    "volume_24h_usd": btc_market.volume,
+                    "liquidity_usd": 0.0,
+                    "condition_id": btc_market.condition_id,
+                    "clob_token_id": btc_market.up_token_id,
+                }])
+
+                # Evaluate and place bet
+                record = await btc_updown_strat.evaluate_and_bet(ctx, btc_market)
+                if record:
+                    store.upsert_runtime_status(
+                        component="btc_updown",
+                        level="ok",
+                        message=f"bet placed: {record.direction} @ {record.confidence:.0%} confidence",
+                        detail=f"market={btc_market.event_slug} price={record.entry_price}",
+                        ts=time.time(),
+                    )
+                else:
+                    store.upsert_runtime_status(
+                        component="btc_updown",
+                        level="ok",
+                        message=f"watching: {btc_market.event_slug} (no signal or already bet)",
+                        detail=f"candles={len(candle_agg.get_history(btc_updown_strat.BTC_CANDLE_MARKET_ID))}",
+                        ts=time.time(),
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("btc_updown.betting_loop_error")
+                store.upsert_runtime_status(
+                    component="btc_updown",
+                    level="error",
+                    message="betting loop error (will retry)",
+                    ts=time.time(),
+                )
+
+            await asyncio.sleep(discovery_interval)
+
+    # Gather all loops
+    tasks = [scanner_loop(), feed_loop(), strategy_loop(), snapshot_loop(), unwind_loop()]
+    if enable_btc_updown:
+        tasks.append(btc_price_feed_loop())
+        tasks.append(btc_updown_betting_loop())
+    await asyncio.gather(*tasks)
 
 
 async def run_backtest(settings: Any, store: SqliteStore) -> None:
