@@ -19,7 +19,9 @@ from risk.rules import RiskEngine
 from storage.sqlite import SqliteStore
 from strategies.base import StrategyContext
 from strategies.cross_venue import CrossVenueFairValueStrategy
+from strategies.five_min_chart import FiveMinuteChartStrategy
 from strategies.market_making import MarketMakingStrategy
+from trading.candles import CandleAggregator
 from trading.feed import BookEvent, FeedEvent, TradeEvent
 from trading.state import SharedState
 from trading.types import Fill, MarketInfo, TopOfBook, TradeTick
@@ -140,10 +142,52 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
     risk = RiskEngine(settings)
     log = get_logger(__name__)
 
-    # Default to microstructure spread-capture market making in paper mode.
-    # Cross-venue FV needs a *real* external odds model; the repo default is a mock.
+    # --- Candle aggregator: builds 5m OHLCV bars from the tick stream ---
+    candle_interval = float(getattr(settings, "candle_interval_secs", 300.0) or 300.0)
+    candle_max_hist = int(getattr(settings, "candle_max_history", 200) or 200)
+    candle_agg = CandleAggregator(interval_secs=candle_interval, max_history=candle_max_hist)
+    state.candle_aggregator = candle_agg
+
+    # --- Build strategy list ---
+    # Primary: 5-minute chart directional strategy (default ON)
+    enable_five_min = bool(getattr(settings, "enable_five_min_chart", True))
+    five_min_strat: FiveMinuteChartStrategy | None = None
+    strategies = []
+    if enable_five_min:
+        five_min_strat = FiveMinuteChartStrategy(
+            candle_agg,
+            fast_ema=int(getattr(settings, "five_min_fast_ema", 9)),
+            slow_ema=int(getattr(settings, "five_min_slow_ema", 21)),
+            trend_ema=int(getattr(settings, "five_min_trend_ema", 50)),
+            rsi_period=int(getattr(settings, "five_min_rsi_period", 14)),
+            rsi_oversold=float(getattr(settings, "five_min_rsi_oversold", 30.0)),
+            rsi_overbought=float(getattr(settings, "five_min_rsi_overbought", 70.0)),
+            atr_period=int(getattr(settings, "five_min_atr_period", 14)),
+            atr_stop_mult=float(getattr(settings, "five_min_atr_stop_mult", 1.5)),
+            atr_tp_mult=float(getattr(settings, "five_min_atr_tp_mult", 2.0)),
+            atr_trail_trigger=float(getattr(settings, "five_min_atr_trail_trigger", 1.0)),
+            atr_trail_dist=float(getattr(settings, "five_min_atr_trail_dist", 1.0)),
+            max_hold_candles=int(getattr(settings, "five_min_max_hold_candles", 24)),
+            min_candles_for_signal=int(getattr(settings, "five_min_min_candles", 55)),
+            min_signal_cooldown_secs=float(getattr(settings, "five_min_cooldown_secs", 300.0)),
+            require_vwap_confluence=bool(getattr(settings, "five_min_require_vwap", True)),
+            require_trend_confluence=bool(getattr(settings, "five_min_require_trend", True)),
+            require_rsi_confluence=bool(getattr(settings, "five_min_require_rsi", True)),
+        )
+        strategies.append(five_min_strat)
+        log.info(
+            "strategy.five_min_chart.enabled",
+            candle_interval_secs=candle_interval,
+            fast_ema=settings.five_min_fast_ema,
+            slow_ema=settings.five_min_slow_ema,
+            trend_ema=settings.five_min_trend_ema,
+        )
+
+    # Legacy strategies (off by default now)
     enable_cross_venue = bool(getattr(settings, "enable_cross_venue", False))
-    strategies = [MarketMakingStrategy()] + ([CrossVenueFairValueStrategy()] if enable_cross_venue else [])
+    if enable_cross_venue:
+        strategies.append(CrossVenueFairValueStrategy())
+
     ctx = StrategyContext(settings=settings, state=state, store=store, broker=broker, risk=risk, portfolio=portfolio, odds=odds)
 
     feed_mode = str(getattr(settings, "polymarket_feed", "") or "").strip().lower()
@@ -269,10 +313,10 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
                 if feed_mode == "ws":
                     # WS MARKET channel expects asset ids; we provide mapping entries.
                     async for ev in feed.events(_feed_ws_subscriptions):  # type: ignore[arg-type]
-                        await _handle_feed_event(ctx, ev)
+                        await _handle_feed_event(ctx, ev, five_min_strat=five_min_strat)
                 else:
                     async for ev in feed.events(_feed_market_ids):  # type: ignore[arg-type]
-                        await _handle_feed_event(ctx, ev)
+                        await _handle_feed_event(ctx, ev, five_min_strat=five_min_strat)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -348,8 +392,38 @@ async def run_backtest(settings: Any, store: SqliteStore) -> None:
     risk = RiskEngine(settings)
     log = get_logger(__name__)
 
+    # Candle aggregator for backtest
+    candle_interval = float(getattr(settings, "candle_interval_secs", 300.0) or 300.0)
+    candle_max_hist = int(getattr(settings, "candle_max_history", 200) or 200)
+    candle_agg = CandleAggregator(interval_secs=candle_interval, max_history=candle_max_hist)
+    state.candle_aggregator = candle_agg
+
+    # Build strategies for backtest
+    enable_five_min = bool(getattr(settings, "enable_five_min_chart", True))
+    five_min_strat: FiveMinuteChartStrategy | None = None
+    strategies = []
+    if enable_five_min:
+        five_min_strat = FiveMinuteChartStrategy(
+            candle_agg,
+            fast_ema=int(getattr(settings, "five_min_fast_ema", 9)),
+            slow_ema=int(getattr(settings, "five_min_slow_ema", 21)),
+            trend_ema=int(getattr(settings, "five_min_trend_ema", 50)),
+            rsi_period=int(getattr(settings, "five_min_rsi_period", 14)),
+            atr_period=int(getattr(settings, "five_min_atr_period", 14)),
+            atr_stop_mult=float(getattr(settings, "five_min_atr_stop_mult", 1.5)),
+            atr_tp_mult=float(getattr(settings, "five_min_atr_tp_mult", 2.0)),
+            max_hold_candles=int(getattr(settings, "five_min_max_hold_candles", 24)),
+            min_candles_for_signal=int(getattr(settings, "five_min_min_candles", 55)),
+            min_signal_cooldown_secs=float(getattr(settings, "five_min_cooldown_secs", 300.0)),
+            require_vwap_confluence=bool(getattr(settings, "five_min_require_vwap", True)),
+            require_trend_confluence=bool(getattr(settings, "five_min_require_trend", True)),
+            require_rsi_confluence=bool(getattr(settings, "five_min_require_rsi", True)),
+        )
+        strategies.append(five_min_strat)
+
     enable_cross_venue = bool(getattr(settings, "enable_cross_venue", False))
-    strategies = [MarketMakingStrategy()] + ([CrossVenueFairValueStrategy()] if enable_cross_venue else [])
+    if enable_cross_venue:
+        strategies.append(CrossVenueFairValueStrategy())
     ctx = StrategyContext(settings=settings, state=state, store=store, broker=broker, risk=risk, portfolio=portfolio, odds=odds)
 
     # Rebuild markets snapshot from the DB is out-of-scope; we trade whatever appears in tape.
@@ -382,7 +456,7 @@ async def run_backtest(settings: Any, store: SqliteStore) -> None:
         ev = _payload_to_event(ts, market_id, kind, payload)
         if ev is None:
             continue
-        await _handle_feed_event(ctx, ev)
+        await _handle_feed_event(ctx, ev, five_min_strat=five_min_strat)
 
         # Run strategies on every event (simple)
         for strat in strategies:
@@ -420,18 +494,47 @@ def _payload_to_event(ts: float, market_id: str, kind: str, payload: dict) -> Fe
     return None
 
 
-async def _handle_feed_event(ctx: StrategyContext, ev: FeedEvent) -> None:
+async def _handle_feed_event(
+    ctx: StrategyContext,
+    ev: FeedEvent,
+    *,
+    five_min_strat: FiveMinuteChartStrategy | None = None,
+) -> None:
+    candle_agg = ctx.state.candle_aggregator
+
     if isinstance(ev, BookEvent):
         async with ctx.state.lock:
             ctx.state.tob[ev.market_id] = ev.tob
             ctx.state.last_book_update_ts = time.time()
+
+        # Feed mid-price into candle aggregator
+        if candle_agg is not None and ev.tob.best_bid is not None and ev.tob.best_ask is not None:
+            mid = 0.5 * (ev.tob.best_bid + ev.tob.best_ask)
+            completed = candle_agg.on_price(ev.market_id, mid, ev.tob.ts)
+            for candle in completed:
+                ctx.store.insert_candle(candle.as_dict())
+                if five_min_strat is not None:
+                    five_min_strat.on_candle_closed(ev.market_id, candle)
+
         fills = await ctx.broker.on_book(ev.market_id, ev.tob)
         if fills:
             await _apply_fills(ctx, fills)
+
     elif isinstance(ev, TradeEvent):
         async with ctx.state.lock:
             ctx.state.last_trade[ev.market_id] = ev.trade
             ctx.state.last_trade_update_ts = time.time()
+
+        # Feed trade into candle aggregator
+        if candle_agg is not None:
+            completed = candle_agg.on_trade(
+                ev.market_id, ev.trade.price, ev.trade.size, ev.trade.ts
+            )
+            for candle in completed:
+                ctx.store.insert_candle(candle.as_dict())
+                if five_min_strat is not None:
+                    five_min_strat.on_candle_closed(ev.market_id, candle)
+
         fills = await ctx.broker.on_trade(ev.market_id, ev.trade)
         if fills:
             await _apply_fills(ctx, fills)

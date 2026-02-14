@@ -170,6 +170,49 @@ class SqliteStore:
                   message TEXT,
                   detail TEXT
                 );
+
+                -- 5-minute OHLCV candles
+                CREATE TABLE IF NOT EXISTS candles (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  market_id TEXT,
+                  open_ts REAL,
+                  close_ts REAL,
+                  open REAL,
+                  high REAL,
+                  low REAL,
+                  close REAL,
+                  volume REAL,
+                  trade_count INTEGER,
+                  vwap REAL,
+                  complete INTEGER
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_candles_market_ts ON candles(market_id, open_ts);
+
+                -- Technical indicator signal snapshots
+                CREATE TABLE IF NOT EXISTS signal_snapshots (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  ts REAL,
+                  market_id TEXT,
+                  close REAL,
+                  ema_fast REAL,
+                  ema_slow REAL,
+                  ema_trend REAL,
+                  rsi REAL,
+                  vwap REAL,
+                  bb_upper REAL,
+                  bb_middle REAL,
+                  bb_lower REAL,
+                  atr REAL,
+                  ema_cross_up INTEGER,
+                  ema_cross_down INTEGER,
+                  above_vwap INTEGER,
+                  rsi_oversold INTEGER,
+                  rsi_overbought INTEGER,
+                  has_active_trade INTEGER
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_signals_market_ts ON signal_snapshots(market_id, ts);
                 """
             )
             # Backwards-compatible migrations for existing DBs.
@@ -691,6 +734,120 @@ class SqliteStore:
                 "detail": str(detail or ""),
             }
         return out
+
+    def insert_candle(self, candle: dict[str, Any]) -> None:
+        """Insert a completed 5-minute candle."""
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO candles(
+                  market_id, open_ts, close_ts,
+                  open, high, low, close,
+                  volume, trade_count, vwap, complete
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    str(candle["market_id"]),
+                    float(candle["open_ts"]),
+                    float(candle["close_ts"]),
+                    float(candle["open"]),
+                    float(candle["high"]),
+                    float(candle["low"]),
+                    float(candle["close"]),
+                    float(candle.get("volume", 0.0)),
+                    int(candle.get("trade_count", 0)),
+                    float(candle.get("vwap", 0.0)),
+                    1 if candle.get("complete", False) else 0,
+                ),
+            )
+            self._conn.commit()
+
+    def insert_signal_snapshot(self, snap: dict[str, Any]) -> None:
+        """Insert a technical indicator signal snapshot."""
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO signal_snapshots(
+                  ts, market_id, close,
+                  ema_fast, ema_slow, ema_trend,
+                  rsi, vwap,
+                  bb_upper, bb_middle, bb_lower,
+                  atr,
+                  ema_cross_up, ema_cross_down,
+                  above_vwap, rsi_oversold, rsi_overbought,
+                  has_active_trade
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    float(snap.get("ts", 0.0)),
+                    str(snap.get("market_id", "")),
+                    snap.get("close"),
+                    snap.get("ema_fast"),
+                    snap.get("ema_slow"),
+                    snap.get("ema_trend"),
+                    snap.get("rsi"),
+                    snap.get("vwap"),
+                    snap.get("bb_upper"),
+                    snap.get("bb_middle"),
+                    snap.get("bb_lower"),
+                    snap.get("atr"),
+                    1 if snap.get("ema_cross_up") else 0,
+                    1 if snap.get("ema_cross_down") else 0,
+                    1 if snap.get("above_vwap") else 0,
+                    1 if snap.get("rsi_oversold") else 0,
+                    1 if snap.get("rsi_overbought") else 0,
+                    1 if snap.get("has_active_trade") else 0,
+                ),
+            )
+            self._conn.commit()
+
+    def fetch_latest_signals(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Fetch latest signal snapshots (one per market, most recent)."""
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                WITH latest AS (
+                  SELECT market_id, MAX(id) AS id_max
+                  FROM signal_snapshots
+                  GROUP BY market_id
+                )
+                SELECT s.ts, s.market_id, s.close,
+                       s.ema_fast, s.ema_slow, s.ema_trend,
+                       s.rsi, s.vwap,
+                       s.bb_upper, s.bb_middle, s.bb_lower,
+                       s.atr,
+                       s.ema_cross_up, s.ema_cross_down,
+                       s.above_vwap, s.rsi_oversold, s.rsi_overbought,
+                       s.has_active_trade
+                FROM signal_snapshots s
+                JOIN latest ON latest.id_max = s.id
+                ORDER BY s.ts DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def fetch_recent_candles(self, market_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """Fetch recent candles for a market."""
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT market_id, open_ts, close_ts,
+                       open, high, low, close,
+                       volume, trade_count, vwap, complete
+                FROM candles
+                WHERE market_id = ?
+                ORDER BY open_ts DESC
+                LIMIT ?
+                """,
+                (str(market_id), int(limit)),
+            )
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def iter_tape(self, start_ts: float | None, end_ts: float | None):
         q = "SELECT ts, market_id, kind, payload_json FROM tape WHERE 1=1"

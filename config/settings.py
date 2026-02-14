@@ -219,6 +219,38 @@ class Settings:
     # Strategy toggles
     enable_cross_venue: bool
 
+    # ── 5-Minute Chart Directional Strategy ──
+    enable_five_min_chart: bool
+    candle_interval_secs: float         # candle period (300 = 5 minutes)
+    candle_max_history: int             # max closed candles to keep per market
+
+    # EMA crossover
+    five_min_fast_ema: int              # fast EMA period (default 9)
+    five_min_slow_ema: int              # slow EMA period (default 21)
+    five_min_trend_ema: int             # trend filter EMA period (default 50)
+
+    # RSI
+    five_min_rsi_period: int
+    five_min_rsi_oversold: float
+    five_min_rsi_overbought: float
+
+    # ATR-based risk management
+    five_min_atr_period: int
+    five_min_atr_stop_mult: float       # stop loss = ATR * this
+    five_min_atr_tp_mult: float         # take profit = ATR * this
+    five_min_atr_trail_trigger: float   # start trailing after ATR * this profit
+    five_min_atr_trail_dist: float      # trailing stop distance = ATR * this
+
+    # Position management
+    five_min_max_hold_candles: int      # max candles to hold a position
+    five_min_min_candles: int           # min candles required before signaling
+    five_min_cooldown_secs: float       # min seconds between signals per market
+
+    # Confluence filters (can be toggled off for testing)
+    five_min_require_vwap: bool
+    five_min_require_trend: bool
+    five_min_require_rsi: bool
+
     _overrides: dict[str, str] | None = None
 
     @staticmethod
@@ -357,6 +389,27 @@ class Settings:
             backtest_start_ts=_get_env("BACKTEST_START_TS"),
             backtest_end_ts=_get_env("BACKTEST_END_TS"),
             enable_cross_venue=_get_bool("ENABLE_CROSS_VENUE", False),
+            # 5-minute chart strategy
+            enable_five_min_chart=_get_bool("ENABLE_FIVE_MIN_CHART", True),
+            candle_interval_secs=_get_float("CANDLE_INTERVAL_SECS", 300.0),
+            candle_max_history=_get_int("CANDLE_MAX_HISTORY", 200),
+            five_min_fast_ema=_get_int("FIVE_MIN_FAST_EMA", 9),
+            five_min_slow_ema=_get_int("FIVE_MIN_SLOW_EMA", 21),
+            five_min_trend_ema=_get_int("FIVE_MIN_TREND_EMA", 50),
+            five_min_rsi_period=_get_int("FIVE_MIN_RSI_PERIOD", 14),
+            five_min_rsi_oversold=_get_float("FIVE_MIN_RSI_OVERSOLD", 30.0),
+            five_min_rsi_overbought=_get_float("FIVE_MIN_RSI_OVERBOUGHT", 70.0),
+            five_min_atr_period=_get_int("FIVE_MIN_ATR_PERIOD", 14),
+            five_min_atr_stop_mult=_get_float("FIVE_MIN_ATR_STOP_MULT", 1.5),
+            five_min_atr_tp_mult=_get_float("FIVE_MIN_ATR_TP_MULT", 2.0),
+            five_min_atr_trail_trigger=_get_float("FIVE_MIN_ATR_TRAIL_TRIGGER", 1.0),
+            five_min_atr_trail_dist=_get_float("FIVE_MIN_ATR_TRAIL_DIST", 1.0),
+            five_min_max_hold_candles=_get_int("FIVE_MIN_MAX_HOLD_CANDLES", 24),
+            five_min_min_candles=_get_int("FIVE_MIN_MIN_CANDLES", 55),
+            five_min_cooldown_secs=_get_float("FIVE_MIN_COOLDOWN_SECS", 300.0),
+            five_min_require_vwap=_get_bool("FIVE_MIN_REQUIRE_VWAP", True),
+            five_min_require_trend=_get_bool("FIVE_MIN_REQUIRE_TREND", True),
+            five_min_require_rsi=_get_bool("FIVE_MIN_REQUIRE_RSI", True),
         )
 
     def as_dict(self) -> dict[str, Any]:

@@ -3,8 +3,12 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from trading.types import MarketInfo, TopOfBook, TradeTick
+
+if TYPE_CHECKING:
+    from trading.candles import CandleAggregator
 
 
 @dataclass
@@ -21,6 +25,9 @@ class SharedState:
 
     last_book_update_ts: float = field(default_factory=lambda: 0.0)
     last_trade_update_ts: float = field(default_factory=lambda: 0.0)
+
+    # 5-minute candle aggregator (shared across feed + strategy loops)
+    candle_aggregator: CandleAggregator | None = field(default=None)
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
